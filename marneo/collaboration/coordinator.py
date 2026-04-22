@@ -138,3 +138,87 @@ async def send_feishu_mention(
     except Exception as e:
         log.error("Feishu mention error: %s", e)
         return False
+
+
+async def run_team_session(
+    user_message: str,
+    team_config: Any,
+    coordinator_engine: Any,
+    progress_cb: Any = None,
+) -> str:
+    """Orchestrate parallel specialist sessions and aggregate results.
+
+    Args:
+        user_message: Original user request
+        team_config: TeamConfig with coordinator, members, roles
+        coordinator_engine: Coordinator's ChatSession for splitting + aggregating
+        progress_cb: Optional async callback(msg: str) for TUI progress display
+
+    Returns:
+        Aggregated final reply string, or "" on failure
+    """
+    from marneo.employee.profile import load_profile  # type: ignore[import]
+    from marneo.engine.chat import ChatSession  # type: ignore[import]
+
+    specialists = team_config.specialists
+    if not specialists:
+        return ""
+
+    async def _notify(msg: str) -> None:
+        if progress_cb:
+            try:
+                await progress_cb(msg)
+            except Exception:
+                pass
+
+    # ── Step 1: Split task ────────────────────────────────────────────
+    await _notify(f"🔀 协调者正在拆分任务（{len(specialists)} 位专员）...")
+    assignments = await split_task_for_specialists(
+        user_message, specialists, coordinator_engine
+    )
+    if not assignments:
+        return ""
+
+    # ── Step 2: Parallel specialist sessions ─────────────────────────
+    async def _run_specialist(member: Any) -> tuple[str, str]:
+        emp_name = member.employee
+        sub_task = assignments.get(emp_name, user_message)
+        await _notify(f"⚡ {emp_name}（{member.role}）开始处理...")
+
+        profile = load_profile(emp_name)
+        system = f"你是 {emp_name}，{member.role}。专注处理分配给你的子任务，简洁回答。"
+        if profile and profile.soul_path.exists():
+            soul = profile.soul_path.read_text(encoding="utf-8").strip()
+            system = f"{soul}\n\n{system}"
+
+        session = ChatSession(system_prompt=system)
+        parts: list[str] = []
+        try:
+            async for event in session.send(sub_task):
+                if event.type == "text" and event.content:
+                    parts.append(event.content)
+        except Exception as e:
+            log.error("[Team] specialist %s error: %s", emp_name, e)
+            parts = [f"（{emp_name} 处理出错：{e}）"]
+
+        reply = "".join(parts).strip()
+        await _notify(f"✓ {emp_name} 完成")
+        return emp_name, reply
+
+    results_raw = await asyncio.gather(
+        *[_run_specialist(m) for m in specialists],
+        return_exceptions=True,
+    )
+    results: dict[str, str] = {
+        emp: reply
+        for item in results_raw
+        if isinstance(item, tuple)
+        for emp, reply in [item]
+    }
+
+    if not results:
+        return ""
+
+    # ── Step 3: Aggregate ─────────────────────────────────────────────
+    await _notify("🔗 协调者正在汇总结果...")
+    return await aggregate_results(user_message, results, coordinator_engine)
