@@ -48,6 +48,7 @@ def _register_subcommands() -> None:
     from marneo.cli.report_cmd import report_app
     from marneo.cli.projects_cmd import projects_app, assign_app
     from marneo.cli.skills_cmd import skills_app
+    from marneo.cli.gateway_cmd import gateway_app
     app.add_typer(setup_app, name="setup")
     app.add_typer(work_app, name="work")
     app.add_typer(hire_app, name="hire")
@@ -56,6 +57,7 @@ def _register_subcommands() -> None:
     app.add_typer(projects_app, name="projects")
     app.add_typer(assign_app, name="assign")
     app.add_typer(skills_app, name="skills")
+    app.add_typer(gateway_app, name="gateway")
 
 
 _register_subcommands()
