@@ -75,7 +75,12 @@ def _call_llm(messages: list[dict], *, system: str, max_tokens: int = 800) -> st
             model=model, max_tokens=max_tokens,
             messages=all_msgs,  # type: ignore[arg-type]
         )
-        return (resp.choices[0].message.content or "").strip()
+        # Use model_dump() to get actual content — msg.content attribute
+        # may return empty string on some providers (e.g. MiniMax) even when
+        # the raw dict has content, due to Pydantic field resolution order.
+        msg = resp.choices[0].message
+        content = (msg.model_dump().get("content") or msg.content or "").strip()
+        return content
     else:
         import anthropic
         client_kwargs = {"api_key": api_key}
@@ -134,7 +139,7 @@ def synthesize_soul(history: list[dict]) -> str:
     try:
         return _call_llm(
             [{"role": "user", "content": "请根据以上访谈记录生成 SOUL.md。"}],
-            system=system, max_tokens=600,
+            system=system, max_tokens=800,
         )
     except Exception as e:
         log.error("SOUL synthesis error: %s", e)
