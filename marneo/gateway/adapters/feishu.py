@@ -102,9 +102,25 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             domain=domain,
         )
 
-        # Run in background thread (lark-oapi WebSocket is synchronous)
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, self._ws_client.start)
+        # Run in a dedicated thread with its own event loop.
+        # lark-oapi Client.start() calls loop.run_until_complete() internally,
+        # which fails if called from an already-running asyncio loop.
+        import threading
+
+        def _run_ws() -> None:
+            import asyncio as _asyncio
+            new_loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(new_loop)
+            try:
+                new_loop.run_until_complete(self._ws_client.start())
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).error("[Feishu] WS thread error: %s", exc)
+            finally:
+                new_loop.close()
+
+        self._ws_thread = threading.Thread(target=_run_ws, daemon=True, name="feishu-ws")
+        self._ws_thread.start()
 
     def _on_message_receive(self, data: Any) -> None:
         """Called by lark-oapi when a message arrives."""
