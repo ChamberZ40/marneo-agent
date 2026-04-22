@@ -51,7 +51,12 @@ def cmd_daily(
     ))
 
     if push:
-        console.print("[dim]推送功能将在 Phase 4 Gateway 完成后启用。[/dim]")
+        from marneo.employee.report_push import push_report
+        ok = push_report(report, name)
+        if ok:
+            console.print("[green]✓ 报告已推送[/green]")
+        else:
+            console.print("[yellow]⚠ 推送失败（运行 marneo report push-config 配置推送目标）[/yellow]")
 
 
 @report_app.command("weekly")
@@ -96,3 +101,33 @@ def cmd_history(
         report = get_daily_report(name, d)
         count = sum(1 for l in (report or "").splitlines() if l.startswith("- ["))
         console.print(f"  [bold #FFD700]{d}[/bold #FFD700]  [dim]{count} 条[/dim]")
+
+
+@report_app.command("push-config")
+def cmd_push_config(
+    employee: str | None = typer.Option(None, "--employee", "-e"),
+) -> None:
+    """配置报告推送目标（平台 + chat ID）。"""
+    from marneo.tui.select_ui import radiolist
+    from marneo.employee.report_push import configure_push
+    from prompt_toolkit import prompt as pt_prompt
+
+    name = employee or _active_employee()
+    if not name:
+        console.print("[dim]尚无员工。[/dim]")
+        return
+
+    platforms = ["feishu", "wechat", "telegram", "discord"]
+    idx = radiolist("推送平台：", platforms, default=0)
+    platform = platforms[idx]
+
+    try:
+        chat_id = pt_prompt(f"  Chat ID（{platform} 的群/用户 ID）: ").strip()
+        if not chat_id:
+            return
+    except KeyboardInterrupt:
+        return
+
+    configure_push(name, platform, chat_id)
+    console.print(f"[green]✓ 推送配置已保存：{platform} → {chat_id}[/green]")
+    console.print("[dim]运行 marneo report daily --push 测试推送[/dim]")
