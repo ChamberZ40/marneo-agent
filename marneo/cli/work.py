@@ -10,9 +10,24 @@ from rich.console import Console
 console = Console()
 work_app = typer.Typer(help="与数字员工对话。", invoke_without_command=True)
 
-_RST = "\033[0m"
-_PRI = "\033[1;38;2;255;102;17m"
-_DIM = "\033[38;2;85;85;85m"
+_RST  = "\033[0m"
+_PRI  = "\033[1;38;2;255;102;17m"
+_DIM  = "\033[38;2;85;85;85m"
+_GOLD = "\033[38;2;255;215;0m"
+
+
+def _select_employee() -> str | None:
+    """Select employee via curses UI. Returns name or None."""
+    from marneo.employee.profile import list_employees
+    names = list_employees()
+    if not names:
+        console.print("[dim]尚无员工。运行 marneo hire 招聘第一位。[/dim]")
+        return None
+    if len(names) == 1:
+        return names[0]
+    from marneo.tui.select_ui import radiolist
+    idx = radiolist("选择员工：", names, default=0)
+    return names[idx]
 
 
 @work_app.callback(invoke_without_command=True)
@@ -25,31 +40,52 @@ def cmd_work(
         console.print("[red]未配置 Provider。请先运行: marneo setup[/red]")
         raise typer.Exit(1)
 
-    name = employee or "Marneo"
+    name = employee or _select_employee()
+    if not name:
+        raise typer.Exit(1)
+
     asyncio.run(_work_loop(name))
 
 
 async def _work_loop(employee_name: str) -> None:
     from marneo.engine.chat import ChatSession
     from marneo.tui.chat_tui import ChatTUI
+    from marneo.employee.profile import load_profile, increment_conversation
+    from marneo.employee.growth import should_level_up, next_level, build_level_directive, promote
+    from marneo.employee.reports import append_daily_entry
+
+    profile = load_profile(employee_name)
+
+    # Build system prompt
+    base_system = (
+        f"你是 {employee_name}，一名专注的数字员工。"
+        "帮助用户推进他们的项目目标。"
+        "保持专业、高效的沟通风格。"
+    )
+    if profile:
+        directive = build_level_directive(profile)
+        if directive:
+            base_system = f"{base_system}\n\n{directive}"
+        if profile.soul_path.exists():
+            soul = profile.soul_path.read_text(encoding="utf-8").strip()
+            base_system = f"{soul}\n\n{base_system}"
 
     tui = ChatTUI(employee_name=employee_name)
     display = tui.make_display()
-    session = ChatSession(
-        system_prompt=(
-            f"你是 {employee_name}，一名专注的数字员工。"
-            "你的工作是帮助用户推进他们的项目目标。"
-            "保持专业、高效、简洁的沟通风格。"
-        )
+    session = ChatSession(system_prompt=base_system)
+
+    level_str = f"[{profile.level}]" if profile else ""
+    welcome = (
+        f"\n  {_PRI}◆ {employee_name}{level_str}{_RST}"
+        f"  {_DIM}就位。  /help · Ctrl+C 退出{_RST}\n"
     )
 
-    welcome = (
-        f"\n  {_PRI}◆ {employee_name}{_RST}"
-        f"  {_DIM}就位。  /help 帮助  Ctrl+C 退出{_RST}\n"
-    )
+    _level_up_pending = False
 
     async def on_input(text: str) -> None:
+        nonlocal _level_up_pending
         cmd = text.lower().strip()
+
         if cmd in ("/quit", "/exit", "/q"):
             tui.print(f"{_DIM}再见。{_RST}")
             tui._running = False
@@ -67,6 +103,12 @@ async def _work_loop(employee_name: str) -> None:
                 f"  /quit    退出\n"
             )
             return
+        if cmd in ("y", "yes") and _level_up_pending:
+            old_lv, new_lv = promote(employee_name)
+            if new_lv:
+                tui.print(f"{_PRI}🎉 恭喜！{employee_name} 已晋升为 {new_lv}！{_RST}")
+            _level_up_pending = False
+            return
 
         tui.print(f"  {_DIM}You › {text}{_RST}")
         display.reset()
@@ -79,6 +121,28 @@ async def _work_loop(employee_name: str) -> None:
             elif event.type == "error":
                 display.on_error(event.content)
 
-        display.finish()
+        reply = display.finish()
+
+        # Post-turn tracking
+        try:
+            updated = increment_conversation(employee_name)
+            if reply.strip():
+                summary = reply.strip()[:60].replace("\n", " ")
+                append_daily_entry(
+                    employee_name,
+                    f"Q: {text[:40]} → {summary}",
+                    tag="对话"
+                )
+            if updated and should_level_up(updated) and not _level_up_pending:
+                nxt = next_level(updated.level)
+                if nxt:
+                    _level_up_pending = True
+                    tui.print(
+                        f"\n{_GOLD}---\n"
+                        f"{employee_name} 申请升级到 {nxt}（在职 {updated.level_conversations} 次对话）\n"
+                        f"输入 y 确认晋升{_RST}"
+                    )
+        except Exception:
+            pass
 
     await tui.run(on_input, welcome=welcome)
