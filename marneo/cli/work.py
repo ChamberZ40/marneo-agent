@@ -70,14 +70,45 @@ async def _work_loop(employee_name: str) -> None:
             soul = profile.soul_path.read_text(encoding="utf-8").strip()
             base_system = f"{soul}\n\n{base_system}"
 
+    # Inject project context
+    try:
+        from marneo.project.workspace import get_employee_projects  # type: ignore[import]
+        projects = get_employee_projects(employee_name)
+        if projects:
+            proj_parts: list[str] = []
+            for proj in projects:
+                proj_parts.append(f"## 项目：{proj.name}")
+                if proj.description:
+                    proj_parts.append(f"描述：{proj.description}")
+                if proj.goals:
+                    proj_parts.append("目标：" + "、".join(proj.goals[:3]))
+                if proj.agent_path.exists():
+                    proj_parts.append(proj.agent_path.read_text(encoding="utf-8").strip())
+            if proj_parts:
+                base_system += "\n\n# 当前项目\n\n" + "\n\n".join(proj_parts)
+    except Exception:
+        projects = []
+
+    # Inject skills
+    try:
+        from marneo.project.skills import get_skills_context  # type: ignore[import]
+        skills_ctx = get_skills_context(employee_name)
+        if skills_ctx:
+            base_system += "\n\n" + skills_ctx
+    except Exception:
+        pass
+
     tui = ChatTUI(employee_name=employee_name)
     display = tui.make_display()
     session = ChatSession(system_prompt=base_system)
 
     level_str = f"[{profile.level}]" if profile else ""
+    proj_count = len(projects) if projects else 0
+    proj_info = f"  {_DIM}{proj_count} 个项目{_RST}" if proj_count else ""
     welcome = (
         f"\n  {_PRI}◆ {employee_name}{level_str}{_RST}"
-        f"  {_DIM}就位。  /help · Ctrl+C 退出{_RST}\n"
+        f"{proj_info}"
+        f"  {_DIM}/help · Ctrl+C 退出{_RST}\n"
     )
 
     _level_up_pending = False
