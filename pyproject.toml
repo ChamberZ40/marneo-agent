@@ -1,0 +1,26 @@
+[project]
+name = "marneo"
+version = "0.1.0"
+description = "Marneo Agent — Project-focused digital employees"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.15.0",
+    "rich>=13.0.0",
+    "prompt-toolkit>=3.0.0",
+    "httpx>=0.28.0",
+    "anthropic>=0.52.0",
+    "openai>=1.30.0",
+    "pyyaml>=6.0.0",
+    "questionary>=2.0.0",
+    "qrcode>=7.0.0",
+]
+
+[project.scripts]
+marneo = "marneo.cli.app:app"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["marneo*"]
