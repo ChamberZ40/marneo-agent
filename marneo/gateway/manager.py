@@ -93,9 +93,43 @@ class GatewayManager:
             except Exception:
                 pass
 
+    async def _start_health_server(self, port: int = 8765) -> None:
+        """Start a lightweight HTTP health check server."""
+        import time
+        _start_time = time.time()
+
+        try:
+            from aiohttp import web
+
+            async def health(request: web.Request) -> web.Response:
+                import json
+                connected = [p for p, a in self._adapters.items() if a.is_running]
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps({
+                        "status": "ok",
+                        "uptime_seconds": int(time.time() - _start_time),
+                        "sessions": self._sessions.active_count,
+                        "connected_channels": connected,
+                    }),
+                )
+
+            app = web.Application()
+            app.router.add_get("/health", health)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "0.0.0.0", port)
+            await site.start()
+            log.info("[Gateway] Health check: http://0.0.0.0:%d/health", port)
+        except ImportError:
+            log.debug("[Gateway] aiohttp not available, health check disabled")
+        except Exception as e:
+            log.warning("[Gateway] Health check server failed to start: %s", e)
+
     async def run_forever(self) -> None:
         self._running = True
         await self.start_all()
+        await self._start_health_server()
         log.info("[Gateway] Running.")
         try:
             while self._running:

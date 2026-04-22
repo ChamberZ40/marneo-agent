@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  marneo-gateway:
+    build: .
+    container_name: marneo-gateway
+    restart: unless-stopped
+    volumes:
+      - marneo-data:/home/marneo/.marneo
+    ports:
+      - "8765:8765"
+    environment:
+      - MARNEO_PROVIDER_API_KEY=${MARNEO_PROVIDER_API_KEY:-}
+      - MARNEO_LOG_LEVEL=${MARNEO_LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  marneo-data:
+    driver: local

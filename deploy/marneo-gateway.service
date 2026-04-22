@@ -1,0 +1,20 @@
+[Unit]
+Description=Marneo Gateway — IM Bridge for Digital Employees
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/bin/python3 -m marneo gateway start --fg
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=marneo-gateway
+
+# Data directory
+Environment=HOME=%h
+
+[Install]
+WantedBy=multi-user.target

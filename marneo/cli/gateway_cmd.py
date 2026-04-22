@@ -165,6 +165,41 @@ PLATFORM_INFO = {
 }
 
 
+@gateway_app.command("install-service")
+def cmd_install_service() -> None:
+    """安装系统服务（开机自启）。"""
+    import shutil
+    from pathlib import Path
+
+    deploy_dir = Path(__file__).parent.parent.parent / "deploy"
+
+    if sys.platform == "darwin":
+        # macOS launchd
+        plist_src = deploy_dir / "com.marneo.gateway.plist"
+        if not plist_src.exists():
+            console.print("[red]找不到 deploy/com.marneo.gateway.plist[/red]")
+            raise typer.Exit(1)
+        dst = Path.home() / "Library/LaunchAgents/com.marneo.gateway.plist"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(plist_src, dst)
+        console.print("[green]✓ 已安装 launchd 服务[/green]")
+        console.print(f"[dim]启用: launchctl load {dst}[/dim]")
+    elif sys.platform.startswith("linux"):
+        # Linux systemd
+        service_src = deploy_dir / "marneo-gateway.service"
+        if not service_src.exists():
+            console.print("[red]找不到 deploy/marneo-gateway.service[/red]")
+            raise typer.Exit(1)
+        dst = Path.home() / ".config/systemd/user/marneo-gateway.service"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(service_src, dst)
+        console.print("[green]✓ 已安装 systemd 用户服务[/green]")
+        console.print("[dim]启用: systemctl --user enable marneo-gateway[/dim]")
+        console.print("[dim]启动: systemctl --user start marneo-gateway[/dim]")
+    else:
+        console.print(f"[yellow]不支持的平台: {sys.platform}[/yellow]")
+
+
 @channels_app.callback(invoke_without_command=True)
 def channels_default(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
