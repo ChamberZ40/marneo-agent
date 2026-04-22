@@ -70,13 +70,16 @@ class ChatSession:
             stream=True,
         )
         async for chunk in stream:
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
-                    yield ChatEvent(type="thinking", content=reasoning)
-                if delta.content:
-                    yield ChatEvent(type="text", content=delta.content)
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta is None:
+                continue
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                yield ChatEvent(type="thinking", content=reasoning)
+            if delta.content:
+                yield ChatEvent(type="text", content=delta.content)
 
     async def _call_anthropic(self, provider: ResolvedProvider) -> AsyncIterator[ChatEvent]:
         import anthropic
