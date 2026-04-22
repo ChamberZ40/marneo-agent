@@ -43,8 +43,14 @@ def main(
 def _register_subcommands() -> None:
     from marneo.cli.setup_cmd import setup_app
     from marneo.cli.work import work_app
+    from marneo.cli.hire_cmd import hire_app
+    from marneo.cli.employees_cmd import employees_app
+    from marneo.cli.report_cmd import report_app
     app.add_typer(setup_app, name="setup")
     app.add_typer(work_app, name="work")
+    app.add_typer(hire_app, name="hire")
+    app.add_typer(employees_app, name="employees")
+    app.add_typer(report_app, name="report")
 
 
 _register_subcommands()
