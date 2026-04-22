@@ -164,6 +164,14 @@ async def _work_loop(employee_name: str) -> None:
                     f"Q: {text[:40]} → {summary}",
                     tag="对话"
                 )
+                # Auto-learn skill (junior/intern employees only)
+                try:
+                    from marneo.employee.skill_learner import maybe_save_skill  # type: ignore[import]
+                    insight = maybe_save_skill(employee_name, text, reply)
+                    if insight:
+                        tui.print(f"\n{_DIM}💡 已提炼新技能：{insight[:40]}{_RST}")
+                except Exception:
+                    pass
             if updated and should_level_up(updated) and not _level_up_pending:
                 nxt = next_level(updated.level)
                 if nxt:
