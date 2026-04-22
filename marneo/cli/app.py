@@ -34,10 +34,82 @@ def main(
     ),
 ) -> None:
     """Marneo — Project-focused digital employees."""
-    if ctx.invoked_subcommand is None:
-        # No subcommand → enter work mode directly
-        from marneo.cli.work import cmd_work
-        cmd_work()
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from rich.console import Console
+    from rich.table import Table
+    from rich import box as rich_box
+
+    console = Console()
+    from marneo import __version__
+    from marneo.core.config import is_configured
+    from marneo.employee.profile import list_employees
+
+    # ── First-run wizard ──────────────────────────────────────────────
+    if not is_configured():
+        from rich.panel import Panel
+        console.print()
+        console.print(Panel(
+            f"[bold #FF6611]欢迎使用 Marneo v{__version__}[/bold #FF6611]\n\n"
+            "新马，新征程。\n\n"
+            "[dim]首次使用需要完成初始配置：[/dim]\n"
+            "  1. 配置 LLM Provider → [bold]marneo setup[/bold]\n"
+            "  2. 招聘第一位数字员工 → [bold]marneo hire[/bold]",
+            border_style="#FF6611", padding=(1, 2),
+        ))
+        return
+
+    employees = list_employees()
+    if not employees:
+        from rich.panel import Panel
+        console.print()
+        console.print(Panel(
+            "[bold #FFD700]Provider 已配置，还没有员工。[/bold #FFD700]\n\n"
+            "运行 [bold]marneo hire[/bold] 招聘第一位数字员工。",
+            border_style="#FFD700", padding=(1, 1),
+        ))
+        return
+
+    # ── Dashboard ─────────────────────────────────────────────────────
+    from marneo.employee.profile import load_profile
+    from marneo.employee.growth import days_at_level
+    from marneo.project.workspace import get_employee_projects
+    from marneo.gateway.config import load_channel_configs
+    from marneo.cli.gateway_cmd import _read_pid
+
+    console.print()
+    console.print(f"[bold #FF6611]◆ Marneo[/bold #FF6611]  [dim]v{__version__}[/dim]")
+    console.print()
+
+    t = Table(box=rich_box.SIMPLE, show_header=True, header_style="bold")
+    t.add_column("员工", style="bold cyan")
+    t.add_column("等级", style="#FFD700")
+    t.add_column("项目")
+    t.add_column("在职天数", justify="right", style="dim")
+
+    for name in employees:
+        p = load_profile(name)
+        if p:
+            projs = get_employee_projects(name)
+            t.add_row(
+                name, p.level,
+                ", ".join(proj.name for proj in projs[:2]) or "—",
+                str(days_at_level(p)),
+            )
+    console.print(t)
+
+    pid = _read_pid()
+    gw = "[green]🟢 运行中[/green]" if pid else "[dim]⚪ 未启动[/dim]"
+    channels = load_channel_configs()
+    enabled_ch = [p for p, c in channels.items() if c.get("enabled")]
+    ch_str = ", ".join(enabled_ch) if enabled_ch else "未配置"
+    console.print(f"  网关：{gw}  渠道：[dim]{ch_str}[/dim]")
+    console.print()
+    console.print("  [dim]marneo work     开始工作[/dim]")
+    console.print("  [dim]marneo status   查看详情[/dim]")
+    console.print("  [dim]marneo hire     招聘员工[/dim]")
+    console.print()
 
 
 def _register_subcommands() -> None:
@@ -58,6 +130,13 @@ def _register_subcommands() -> None:
     app.add_typer(assign_app, name="assign")
     app.add_typer(skills_app, name="skills")
     app.add_typer(gateway_app, name="gateway")
+
+    from marneo.cli.status_cmd import cmd_status as _cmd_status
+
+    @app.command("status")
+    def _status_cmd() -> None:
+        """显示全局状态。"""
+        _cmd_status()
 
 
 _register_subcommands()
