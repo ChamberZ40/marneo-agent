@@ -73,6 +73,34 @@ class GatewayManager:
             await adapter.send_reply(msg.chat_id, chunk, context_token=msg.context_token)
 
     async def start_all(self) -> None:
+        # ── Per-employee Feishu bots ──────────────────────────────────────────
+        try:
+            from marneo.employee.feishu_config import list_configured_employees, load_feishu_config
+            from marneo.gateway.adapters.feishu import FeishuChannelAdapter
+
+            for emp_name in list_configured_employees():
+                emp_cfg = load_feishu_config(emp_name)
+                if not emp_cfg or not emp_cfg.is_complete:
+                    continue
+                # Create a dedicated adapter for this employee
+                adapter = FeishuChannelAdapter(self, employee_name=emp_name)
+                self.register(adapter)
+                config = {
+                    "app_id": emp_cfg.app_id,
+                    "app_secret": emp_cfg.app_secret,
+                    "domain": emp_cfg.domain,
+                    "enabled": True,
+                }
+                try:
+                    ok = await adapter.connect(config)
+                    log.info("[Gateway] employee %s feishu: %s", emp_name,
+                             "connected" if ok else "failed")
+                except Exception as e:
+                    log.error("[Gateway] employee %s feishu error: %s", emp_name, e)
+        except Exception as e:
+            log.warning("[Gateway] employee feishu setup error: %s", e)
+
+        # ── Global channel configs ────────────────────────────────────────────
         from marneo.gateway.config import load_channel_configs
         for platform, config in load_channel_configs().items():
             if not config.get("enabled", False):

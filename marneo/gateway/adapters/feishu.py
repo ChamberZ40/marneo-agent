@@ -91,9 +91,12 @@ class MessageDeduplicator:
 class FeishuChannelAdapter(BaseChannelAdapter):
     """Feishu/Lark adapter — WebSocket (default) or Webhook connection mode."""
 
-    def __init__(self, manager: Any) -> None:
-        super().__init__("feishu")
+    def __init__(self, manager: Any, employee_name: str = "") -> None:
+        # Use "feishu:<name>" as platform key for employee-specific adapters
+        platform = f"feishu:{employee_name}" if employee_name else "feishu"
+        super().__init__(platform)
         self._manager = manager
+        self._employee_name = employee_name
         self._app_id = ""
         self._app_secret = ""
         self._domain = "feishu"
@@ -308,7 +311,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             self._add_reaction(msg_id, "Awaiting")
 
             channel_msg = ChannelMessage(
-                platform="feishu",
+                platform=self.platform,
                 chat_id=chat_id,
                 chat_type="group" if chat_type == "group" else "dm",
                 user_id=user_id,
@@ -355,7 +358,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             token = getattr(data, "open_message_id", "")
 
             msg = ChannelMessage(
-                platform="feishu",
+                platform=self.platform,
                 chat_id=token or user_id,
                 user_id=user_id,
                 text=cmd,

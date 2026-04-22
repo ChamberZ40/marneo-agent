@@ -116,3 +116,7 @@ def cmd_fire(name: str = typer.Argument(..., help="员工名称")) -> None:
 
     shutil.rmtree(p.directory)
     console.print(f"[dim]{name} 已解雇。[/dim]")
+
+
+from marneo.cli.employee_feishu_cmd import employee_feishu_app
+employees_app.add_typer(employee_feishu_app, name="feishu")
