@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 MAX_MSG_LEN = 4000          # practical Feishu per-message text limit
 _DEDUP_TTL = 86400          # 24 h — matches openclaw
 _DEDUP_CACHE_SIZE = 2048
-_REACTION_IN_PROGRESS = "DONE"     # "了解" badge while processing
+_REACTION_IN_PROGRESS = "SaluteFace"  # "致敬" badge while processing
 _REACTION_FAILURE = "CrossMark"    # ✗ on error
 _REACTION_CACHE_SIZE = 1024        # LRU cap for (msg_id → reaction_id)
 _PENDING_INBOUND_MAX = 1000        # cap pending queue; drop oldest beyond
@@ -479,7 +479,43 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if chat_type == "p2p" and self._dm_policy == "disabled":
             return
 
-        if not text.strip():
+        # Download attachments for image/file messages (multimodal support)
+        attachments: list[dict] = []
+        if msg_type == "image":
+            image_key = content.get("image_key", "")
+            if image_key and msg_id:
+                data, media_type, filename = await self._download_feishu_resource(
+                    message_id=msg_id,
+                    file_key=image_key,
+                    resource_type="image",
+                    fallback_filename=f"{image_key}.jpg",
+                )
+                if data:
+                    attachments.append({
+                        "data": data,
+                        "media_type": media_type,
+                        "filename": filename,
+                    })
+
+        elif msg_type == "file":
+            file_key = content.get("file_key", "")
+            file_name = content.get("file_name", "") or file_key
+            if file_key and msg_id:
+                data, media_type, filename = await self._download_feishu_resource(
+                    message_id=msg_id,
+                    file_key=file_key,
+                    resource_type="file",
+                    fallback_filename=file_name,
+                )
+                if data:
+                    attachments.append({
+                        "data": data,
+                        "media_type": media_type,
+                        "filename": filename,
+                    })
+
+        # Allow messages that have attachments even when text is empty
+        if not text.strip() and not attachments:
             return
 
         channel_msg = ChannelMessage(
@@ -489,6 +525,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             user_id=sender_id,
             text=text,
             msg_id=msg_id,
+            attachments=attachments,
         )
 
         # Per-chat serial lock (openclaw createChatQueue)
@@ -501,9 +538,10 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if msg_type == "text":
             return content.get("text", "").strip()
         if msg_type == "image":
-            return f"[图片: {content.get('image_key', '')}]"
+            # Caption text if present; download happens in _handle_message_event_data
+            return content.get("text", "").strip() or ""
         if msg_type == "file":
-            return f"[文件: {content.get('file_name', '') or content.get('file_key', '')}]"
+            return content.get("file_name", "") or content.get("file_key", "") or ""
         if msg_type in ("post", "rich_text"):
             # Flatten post content to plain text
             return self._flatten_post(content)
@@ -583,6 +621,70 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             .domain(lark_domain)
             .build()
         )
+
+    async def _download_feishu_resource(
+        self,
+        *,
+        message_id: str,
+        file_key: str,
+        resource_type: str,
+        fallback_filename: str = "",
+    ) -> tuple[bytes, str, str]:
+        """Download a Feishu message resource. Returns (data, media_type, filename).
+
+        Ported from hermes-agent._download_feishu_message_resource.
+        resource_type: "image", "file", "audio", "media"
+        Returns (b"", "", "") on any failure.
+        """
+        import mimetypes as _mimetypes
+
+        if not message_id or not file_key or not self._app_id:
+            return b"", "", ""
+
+        try:
+            from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+            client = self._build_lark_client()
+            request = (
+                GetMessageResourceRequest.builder()
+                .message_id(message_id)
+                .file_key(file_key)
+                .type(resource_type)
+                .build()
+            )
+            resp = await asyncio.to_thread(client.im.v1.message_resource.get, request)
+
+            if not resp or not getattr(resp, "success", lambda: False)():
+                log.debug(
+                    "[Feishu] Resource download failed %s/%s: code=%s",
+                    message_id, file_key, getattr(resp, "code", "?"),
+                )
+                return b"", "", ""
+
+            # Read binary data (BytesIO.getvalue() or file-like .read())
+            file_obj = getattr(resp, "file", None)
+            if file_obj is None:
+                return b"", "", ""
+            data = bytes(file_obj.getvalue()) if hasattr(file_obj, "getvalue") else bytes(file_obj.read())
+            if not data:
+                return b"", "", ""
+
+            # Detect media type from Content-Type header (hermes pattern)
+            raw = getattr(resp, "raw", None)
+            headers = getattr(raw, "headers", {}) or {}
+            ct = str(
+                headers.get("Content-Type") or headers.get("content-type") or ""
+            ).split(";")[0].strip().lower()
+
+            filename = getattr(resp, "file_name", None) or fallback_filename or file_key
+            if not ct:
+                ct = _mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+            return data, ct, filename
+
+        except Exception as exc:
+            log.warning("[Feishu] _download_feishu_resource error: %s", exc)
+            return b"", "", ""
 
     async def _add_reaction(self, msg_id: str, emoji_type: str) -> Optional[str]:
         """Add emoji reaction; return reaction_id or None."""
