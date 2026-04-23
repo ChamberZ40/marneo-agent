@@ -5,6 +5,7 @@ from collections import OrderedDict
 from typing import Any
 from marneo.gateway.base import BaseChannelAdapter, ChannelMessage
 from marneo.gateway.session import SessionStore
+from marneo.tools.registry import registry as _tool_registry
 
 log = logging.getLogger(__name__)
 DEDUP_TTL = 60
@@ -57,8 +58,7 @@ class GatewayManager:
         parts: list[str] = []
         try:
             async with asyncio.timeout(REPLY_TIMEOUT):
-                from marneo.tools.registry import registry
-                async for event in engine.send_with_tools(msg.text, registry=registry):
+                async for event in engine.send_with_tools(msg.text, registry=_tool_registry):
                     if event.type == "text" and event.content:
                         parts.append(event.content)
                     elif event.type == "tool_result":
