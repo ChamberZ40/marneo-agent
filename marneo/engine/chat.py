@@ -136,7 +136,7 @@ class ChatSession:
 
         stream = await client.chat.completions.create(
             model=provider.model,
-            messages=msgs,
+            messages=msgs,  # type: ignore[arg-type]
             max_tokens=4096,
             stream=True,
         )
