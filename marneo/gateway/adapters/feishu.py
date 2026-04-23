@@ -32,6 +32,66 @@ log = logging.getLogger(__name__)
 MAX_MSG_LEN = 4000          # practical Feishu per-message text limit
 _DEDUP_TTL = 86400          # 24 h — matches openclaw
 _DEDUP_CACHE_SIZE = 2048
+
+# Detect markdown formatting — ported from hermes-agent
+_MARKDOWN_HINT_RE = re.compile(
+    r"(^#{1,6}\s)|(^\s*[-*]\s)|(^\s*\d+\.\s)|(^\s*---+\s*$)|(```)|(`[^`\n]+`)"
+    r"|(\*\*[^*\n].+?\*\*)|(~~[^~\n].+?~~)|(\*[^*\n]+\*)|(\[[^\]]+\]\([^)]+\))|(^>\s)",
+    re.MULTILINE,
+)
+_MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
+_MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
+
+
+def _build_post_payload(content: str) -> str:
+    """Build Feishu post payload with markdown rows (hermes-agent pattern).
+
+    Splits at fenced code blocks so prose + code both render correctly.
+    """
+    rows: list[list[dict]] = []
+    if "```" not in content:
+        rows = [[{"tag": "md", "text": content}]]
+    else:
+        current: list[str] = []
+        in_code = False
+
+        def _flush() -> None:
+            nonlocal current
+            seg = "\n".join(current)
+            if seg.strip():
+                rows.append([{"tag": "md", "text": seg}])
+            current = []
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            is_fence = bool(
+                _MARKDOWN_FENCE_CLOSE_RE.match(stripped) if in_code
+                else _MARKDOWN_FENCE_OPEN_RE.match(stripped)
+            )
+            if is_fence:
+                if not in_code:
+                    _flush()
+                current.append(line)
+                in_code = not in_code
+                if not in_code:
+                    _flush()
+                continue
+            current.append(line)
+        _flush()
+
+    if not rows:
+        rows = [[{"tag": "md", "text": content}]]
+
+    return json.dumps({"zh_cn": {"content": rows}}, ensure_ascii=False)
+
+
+def _outbound_msg_type_and_payload(text: str) -> tuple[str, str]:
+    """Return (msg_type, payload_json) — post for markdown, text for plain."""
+    if _MARKDOWN_HINT_RE.search(text):
+        return "post", _build_post_payload(text)
+    return "text", json.dumps({"text": text}, ensure_ascii=False)
+
+
 _REACTION_IN_PROGRESS = "SaluteFace"  # "致敬" badge while processing
 _REACTION_FAILURE = "CrossMark"    # ✗ on error
 _REACTION_CACHE_SIZE = 1024        # LRU cap for (msg_id → reaction_id)
@@ -832,13 +892,13 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 ReplyMessageRequestBody,
             )
             client = self._build_lark_client()
-            content = json.dumps({"text": text}, ensure_ascii=False)
+            msg_type, content = _outbound_msg_type_and_payload(text)
 
             if reply_to_msg_id:
                 # Try reply first
                 body = (
                     ReplyMessageRequestBody.builder()
-                    .msg_type("text")
+                    .msg_type(msg_type)
                     .content(content)
                     .build()
                 )
@@ -866,7 +926,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             body = (
                 CreateMessageRequestBody.builder()
                 .receive_id(chat_id)
-                .msg_type("text")
+                .msg_type(msg_type)
                 .content(content)
                 .build()
             )
