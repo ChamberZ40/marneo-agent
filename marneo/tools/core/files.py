@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import glob as _glob
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -29,7 +28,7 @@ def read_file(args: dict[str, Any], **kw: Any) -> str:
         lines = raw.splitlines()
         total = len(lines)
         start = max(0, offset - 1)
-        end = min(start + limit + 1, total)
+        end = min(start + limit, total)
         selected = lines[start:end]
         numbered = "\n".join(f"{i + start + 1}\t{line}" for i, line in enumerate(selected))
         if len(numbered) > _MAX_READ_CHARS:
@@ -85,10 +84,8 @@ def glob_files(args: dict[str, Any], **kw: Any) -> str:
         return tool_error("pattern is required")
     try:
         base_path = Path(base).expanduser()
-        full_pattern = str(base_path / "**" / pattern) if "/" not in pattern else str(base_path / pattern)
+        full_pattern = str(base_path / pattern)
         matches = _glob.glob(full_pattern, recursive=True)
-        if not matches:
-            matches = _glob.glob(str(base_path / pattern))
         matches = sorted(str(Path(m)) for m in matches if Path(m).is_file())[:200]
         return tool_result(files=matches, count=len(matches))
     except Exception as exc:

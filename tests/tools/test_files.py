@@ -20,8 +20,9 @@ def test_read_file_with_offset_and_limit(tmp_path):
     f.write_text("\n".join(f"line{i}" for i in range(1, 11)))
     result = json.loads(read_file({"path": str(f), "offset": 3, "limit": 3}))
     assert "line3" in result["content"]
-    assert "line6" in result["content"]
-    assert "line7" not in result["content"]
+    assert "line5" in result["content"]
+    assert "line6" not in result["content"]
+    assert result["returned"] == 3
 
 
 def test_read_file_missing_returns_error(tmp_path):
@@ -62,7 +63,7 @@ def test_glob_files(tmp_path):
     (tmp_path / "a.py").write_text("")
     (tmp_path / "b.py").write_text("")
     (tmp_path / "c.txt").write_text("")
-    result = json.loads(glob_files({"pattern": "*.py", "path": str(tmp_path)}))
+    result = json.loads(glob_files({"pattern": "**/*.py", "path": str(tmp_path)}))
     files = result["files"]
     assert len(files) == 2
     assert all(f.endswith(".py") for f in files)
