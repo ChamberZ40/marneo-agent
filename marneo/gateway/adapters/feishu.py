@@ -484,35 +484,39 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if msg_type == "image":
             image_key = content.get("image_key", "")
             if image_key and msg_id:
-                data, media_type, filename = await self._download_feishu_resource(
+                att_data, att_media_type, att_filename = await self._download_feishu_resource(
                     message_id=msg_id,
                     file_key=image_key,
                     resource_type="image",
                     fallback_filename=f"{image_key}.jpg",
                 )
-                if data:
+                if att_data:
                     attachments.append({
-                        "data": data,
-                        "media_type": media_type,
-                        "filename": filename,
+                        "data": att_data,
+                        "media_type": att_media_type,
+                        "filename": att_filename,
                     })
+                else:
+                    log.info("[Feishu] Image download failed for key=%s msg=%s", image_key, msg_id)
 
         elif msg_type == "file":
             file_key = content.get("file_key", "")
             file_name = content.get("file_name", "") or file_key
             if file_key and msg_id:
-                data, media_type, filename = await self._download_feishu_resource(
+                att_data, att_media_type, att_filename = await self._download_feishu_resource(
                     message_id=msg_id,
                     file_key=file_key,
                     resource_type="file",
                     fallback_filename=file_name,
                 )
-                if data:
+                if att_data:
                     attachments.append({
-                        "data": data,
-                        "media_type": media_type,
-                        "filename": filename,
+                        "data": att_data,
+                        "media_type": att_media_type,
+                        "filename": att_filename,
                     })
+                else:
+                    log.info("[Feishu] File download failed for key=%s msg=%s", file_key, msg_id)
 
         # Allow messages that have attachments even when text is empty
         if not text.strip() and not attachments:
