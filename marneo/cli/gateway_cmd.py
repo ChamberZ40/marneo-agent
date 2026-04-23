@@ -67,6 +67,10 @@ def _gateway_runner() -> None:
     manager.register(TelegramAdapter(manager))
     manager.register(DiscordAdapter(manager))
 
+    # Load all tools (triggers self-registration in registry)
+    from marneo.tools.loader import load_all_tools
+    load_all_tools()
+
     asyncio.run(manager.run_forever())
 
 

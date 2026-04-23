@@ -45,6 +45,9 @@ def cmd_work(
     if not name:
         raise typer.Exit(1)
 
+    from marneo.tools.loader import load_all_tools
+    load_all_tools()
+
     asyncio.run(_work_loop(name))
 
 
