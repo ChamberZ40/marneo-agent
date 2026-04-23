@@ -103,34 +103,22 @@ class ToolRegistry:
             return tool_error(f"{type(exc).__name__}: {exc}")
 
 
-def _run_async(coro_factory: Any) -> Any:
+def _run_async(coro_factory: Callable[[], Any]) -> Any:
     """Run a coroutine factory from sync context.
 
-    Accepts either a coroutine object OR a zero-arg callable that returns one.
-    When called from within a running event loop, spawns a fresh thread with
-    its own event loop to avoid cross-loop contamination.
+    Always accepts a zero-arg callable that returns a coroutine, so the
+    coroutine is created inside the target event loop's thread (no cross-loop
+    contamination). Call site: `_run_async(lambda: handler(args, **kw))`.
     """
-    import inspect
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
     if loop and loop.is_running():
         import concurrent.futures
-        # Create the coroutine in the worker thread to avoid cross-loop issues
-        if inspect.iscoroutine(coro_factory):
-            # Already a coroutine — we can't avoid cross-loop, but wrap safely
-            coro = coro_factory
-        else:
-            coro = None
-        def _run() -> Any:
-            c = coro if coro is not None else coro_factory()
-            return asyncio.run(c)
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_run)
+            future = pool.submit(asyncio.run, coro_factory())
             return future.result()
-    if inspect.iscoroutine(coro_factory):
-        return asyncio.run(coro_factory)
     return asyncio.run(coro_factory())
 
 
