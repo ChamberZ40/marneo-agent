@@ -26,7 +26,7 @@ async def test_send_with_tools_no_tool_call(registry_with_echo):
     """When LLM returns only text, stream it directly."""
     session = ChatSession(system_prompt="test")
 
-    async def fake_send(text):
+    async def fake_send(text, **kwargs):
         yield ChatEvent(type="text", content="hello")
         yield ChatEvent(type="done")
 
@@ -45,7 +45,7 @@ async def test_send_with_tools_executes_tool_and_continues(registry_with_echo):
     session = ChatSession(system_prompt="test")
     call_count = 0
 
-    async def fake_send(text):
+    async def fake_send(text, **kwargs):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -81,7 +81,7 @@ async def test_send_with_tools_respects_max_iterations():
     )
     session = ChatSession()
 
-    async def always_calls_tool(text):
+    async def always_calls_tool(text, **kwargs):
         yield ChatEvent(type="tool_call", content=json.dumps({"id": "t1", "name": "loop_tool", "args": {}}))
         yield ChatEvent(type="done")
 
@@ -99,7 +99,7 @@ async def test_send_with_tools_no_registry_falls_back_to_send():
     """With no registry, falls back to plain send()."""
     session = ChatSession()
 
-    async def fake_send(text):
+    async def fake_send(text, **kwargs):
         yield ChatEvent(type="text", content="plain response")
         yield ChatEvent(type="done")
 
