@@ -45,7 +45,7 @@ class GatewayManager:
     async def dispatch(self, msg: ChannelMessage) -> None:
         if msg.msg_id and self._dedup.seen(msg.msg_id):
             return
-        if not msg.text.strip():
+        if not msg.text.strip() and not msg.attachments:
             return
         engine, lock = await self._sessions.get_or_create(msg.platform, msg.chat_id)
         adapter = self._adapters.get(msg.platform)
