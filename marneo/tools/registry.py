@@ -61,7 +61,8 @@ class ToolRegistry:
             )
 
     def get_entry(self, name: str) -> Optional[ToolEntry]:
-        return self._tools.get(name)
+        with self._lock:
+            return self._tools.get(name)
 
     def get_definitions(self, names: Optional[list[str]] = None) -> list[dict[str, Any]]:
         """Return OpenAI-format tool definitions for enabled tools."""
@@ -77,11 +78,10 @@ class ToolRegistry:
                 try:
                     if not entry.check_fn():
                         continue
-                except Exception:
+                except Exception as exc:
+                    log.warning("[Tools] check_fn for %r raised: %s", entry.name, exc)
                     continue
-            schema = dict(entry.schema)
-            schema["name"] = entry.name
-            result.append({"type": "function", "function": schema})
+            result.append({"type": "function", "function": {**entry.schema, "name": entry.name}})
         return result
 
     def dispatch(self, name: str, args: dict[str, Any], **kwargs: Any) -> str:
@@ -90,31 +90,48 @@ class ToolRegistry:
             return tool_error(f"Unknown tool: {name}")
         try:
             if entry.is_async:
-                result = _run_async(entry.handler(args, **kwargs))
+                result = _run_async(lambda: entry.handler(args, **kwargs))
             else:
                 result = entry.handler(args, **kwargs)
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False, default=str)
-            if entry.max_result_chars and len(result) > entry.max_result_chars:
-                result = result[:entry.max_result_chars] + "\n... (truncated)"
+            if entry.max_result_chars is not None and len(result) > entry.max_result_chars:
+                result = json.dumps({"truncated": True, "content": result[:entry.max_result_chars]}, ensure_ascii=False)
             return result
         except Exception as exc:
             log.error("[Tools] %s dispatch error: %s", name, exc, exc_info=True)
             return tool_error(f"{type(exc).__name__}: {exc}")
 
 
-def _run_async(coro: Any) -> Any:
-    """Run a coroutine from sync context, handling running-loop cases."""
+def _run_async(coro_factory: Any) -> Any:
+    """Run a coroutine factory from sync context.
+
+    Accepts either a coroutine object OR a zero-arg callable that returns one.
+    When called from within a running event loop, spawns a fresh thread with
+    its own event loop to avoid cross-loop contamination.
+    """
+    import inspect
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
     if loop and loop.is_running():
         import concurrent.futures
+        # Create the coroutine in the worker thread to avoid cross-loop issues
+        if inspect.iscoroutine(coro_factory):
+            # Already a coroutine — we can't avoid cross-loop, but wrap safely
+            coro = coro_factory
+        else:
+            coro = None
+        def _run() -> Any:
+            c = coro if coro is not None else coro_factory()
+            return asyncio.run(c)
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(asyncio.run, coro)
+            future = pool.submit(_run)
             return future.result()
-    return asyncio.run(coro)
+    if inspect.iscoroutine(coro_factory):
+        return asyncio.run(coro_factory)
+    return asyncio.run(coro_factory())
 
 
 # Module-level singleton
