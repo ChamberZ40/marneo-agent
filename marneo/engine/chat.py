@@ -78,8 +78,10 @@ class ChatSession:
                 yield event
             return
 
-        # First call uses user_text; subsequent calls use "" (tool results already in history)
+        # First call uses user_text; subsequent iterations skip the user append
+        # by directly calling the LLM with existing history (tool results already injected)
         call_text = user_text
+        hit_limit = True
 
         for _iteration in range(max_iterations):
             tool_calls_this_round: list[dict] = []
@@ -88,13 +90,19 @@ class ChatSession:
                 if event.type == "tool_call":
                     try:
                         tool_calls_this_round.append(_json.loads(event.content))
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.warning("[send_with_tools] Malformed tool_call JSON: %s", exc)
+                        yield ChatEvent(type="error", content=f"Malformed tool_call JSON: {exc}")
                     yield event
                 elif event.type != "done":
                     yield event
 
+            # Fix: remove ghost empty user message injected by send("") on iterations > 0
+            if not call_text and self.messages and self.messages[-1] == {"role": "user", "content": ""}:
+                self.messages.pop()
+
             if not tool_calls_this_round:
+                hit_limit = False
                 break
 
             # Execute tools and inject results into history for next LLM call
@@ -104,14 +112,16 @@ class ChatSession:
                 tc_id = tc.get("id", "")
                 result = registry.dispatch(name, args)
                 yield ChatEvent(type="tool_result", content=result)
-                # Inject as tool message so LLM sees the result
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
                     "content": result,
                 })
 
-            call_text = ""  # subsequent iterations: history has tool results
+            call_text = ""  # subsequent iterations: tool results already in history
+
+        if hit_limit:
+            yield ChatEvent(type="error", content="max_iterations reached without final text response")
 
         yield ChatEvent(type="done")
 
