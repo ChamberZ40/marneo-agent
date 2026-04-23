@@ -18,7 +18,7 @@ def test_bash_captures_stderr():
 
 def test_bash_timeout():
     result = json.loads(bash({"command": "sleep 10", "timeout": 1}))
-    assert "error" in result or result.get("exit_code") != 0
+    assert result.get("error", "").startswith("Command timed out")
 
 
 def test_bash_blocks_dangerous_commands():

@@ -1,25 +1,47 @@
 # marneo/tools/core/bash.py
-"""Bash execution tool with basic safety checks."""
+"""Bash execution tool with basic safety checks.
+
+Trust model: this tool is agent-internal. The LLM generates the command string,
+which is passed directly to /bin/bash via shell=True. The blocklist is a last-resort
+guard against clearly catastrophic commands, not a security boundary against a
+fully adversarial caller.
+"""
 from __future__ import annotations
 
+import logging
 import re
+import shutil
 import subprocess
 from typing import Any
 
 from marneo.tools.registry import registry, tool_result, tool_error
 
+log = logging.getLogger(__name__)
+
 _DEFAULT_TIMEOUT = 60
 _MAX_OUTPUT = 50_000
 
+# Block clearly catastrophic patterns only.
+# False-positive risk: prefer narrow patterns that won't hit common log/doc searches.
 _BLOCKED_PATTERNS = [
-    re.compile(r"rm\s+-[rf]{1,2}\s+/(?:\s|$)"),
+    # rm targeting root or critical system dirs
+    re.compile(r"rm\s+-[rRf]{1,3}\s+/(?:$|\s|etc|usr|var|home|bin|sbin|lib|boot|sys|proc)"),
+    # fork bomb
     re.compile(r":\(\)\s*\{"),
+    # format disk
     re.compile(r"mkfs\.[a-z0-9]+\s+/dev/"),
-    re.compile(r"dd\s+.*of=/dev/[sh]d"),
-    re.compile(r">\s*/dev/[sh]d[a-z]"),
-    re.compile(r"\bshutdown\b|\bpoweroff\b|\breboot\b|\bhalt\b"),
+    # dd overwriting any block device (nvme/vda/mmcblk/sda/hda)
+    re.compile(r"dd\s+.*of=/dev/"),
+    # redirect to block device
+    re.compile(r">\s*/dev/(?:sd|hd|nvme|vd|mmcblk)[a-z0-9]"),
+    # shutdown/reboot/halt/poweroff as executing binary (not in strings/args)
+    re.compile(r"(?:^|[;|&`(\s])(?:sudo\s+)?(?:shutdown|poweroff|reboot|halt)\b"),
+    # chmod 777 on root
     re.compile(r"chmod\s+-[rR]\s+777\s+/"),
 ]
+
+# Resolve bash path once at import; fail clearly if missing
+_BASH = shutil.which("bash") or "/bin/bash"
 
 
 def _is_blocked(command: str) -> bool:
@@ -45,7 +67,7 @@ def bash(args: dict[str, Any], **kw: Any) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
-            executable="/bin/bash",
+            executable=_BASH,
         )
         stdout = proc.stdout
         stderr = proc.stderr
@@ -56,7 +78,10 @@ def bash(args: dict[str, Any], **kw: Any) -> str:
         return tool_result(stdout=stdout, stderr=stderr, exit_code=proc.returncode)
     except subprocess.TimeoutExpired:
         return tool_error(f"Command timed out after {timeout}s")
+    except FileNotFoundError:
+        return tool_error(f"bash not found at {_BASH}")
     except Exception as exc:
+        log.error("[bash] Unexpected error: %s", exc, exc_info=True)
         return tool_error(str(exc))
 
 
