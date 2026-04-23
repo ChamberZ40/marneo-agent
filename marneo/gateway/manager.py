@@ -58,11 +58,15 @@ class GatewayManager:
         parts: list[str] = []
         try:
             async with asyncio.timeout(REPLY_TIMEOUT):
-                async for event in engine.send_with_tools(msg.text, registry=_tool_registry):
+                async for event in engine.send_with_tools(
+                    msg.text,
+                    registry=_tool_registry,
+                    attachments=msg.attachments or None,
+                ):
                     if event.type == "text" and event.content:
                         parts.append(event.content)
                     elif event.type == "tool_result":
-                        log.debug("[Gateway] Tool result: %s", event.content[:100])
+                        log.debug("[Gateway] Tool result: %s", event.content[:100] + ("..." if len(event.content) > 100 else ""))
         except TimeoutError:
             parts = ["处理超时，请重试。"]
         except Exception as e:

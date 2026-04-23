@@ -28,7 +28,7 @@ async def test_process_uses_send_with_tools():
 
     msg = ChannelMessage(platform="fake", chat_id="c1", text="hello")
 
-    async def fake_send_with_tools(text, registry=None, max_iterations=20):
+    async def fake_send_with_tools(text, registry=None, max_iterations=20, attachments=None):
         yield ChatEvent(type="text", content="hi there")
         yield ChatEvent(type="done")
 
@@ -53,7 +53,7 @@ async def test_process_ignores_tool_result_events():
     msg = ChannelMessage(platform="fake", chat_id="c1", text="run tool")
 
     import json
-    async def fake_with_tool_result(text, registry=None, max_iterations=20):
+    async def fake_with_tool_result(text, registry=None, max_iterations=20, attachments=None):
         yield ChatEvent(type="tool_result", content=json.dumps({"ok": True}))
         yield ChatEvent(type="text", content="Done!")
         yield ChatEvent(type="done")
