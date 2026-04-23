@@ -27,7 +27,7 @@ def cmd_hire(
     console.print()
     console.print(Panel(
         "[bold #FF6611]Marneo 招聘面试[/bold #FF6611]\n\n"
-        "通过 AI 面试，为新员工生成专属身份档案（SOUL.md）。\n"
+        "通过 AI 面试，为新员工创建专属的身份档案。\n"
         "[dim]Ctrl+C 可随时取消。[/dim]",
         border_style="#FF6611", padding=(1, 2),
     ))
@@ -35,7 +35,7 @@ def cmd_hire(
     # Get employee name
     if not name:
         try:
-            name = pt_prompt("  员工名称（如 GAI）: ").strip()
+            name = pt_prompt("  给这位员工取个名字: ").strip()
         except KeyboardInterrupt:
             console.print("\n[dim]已取消。[/dim]")
             raise typer.Exit()
@@ -103,7 +103,7 @@ def cmd_hire(
     console.print()
     console.print(Panel(
         soul_content,
-        title=f"[bold #00FFCC]✦ {name} 的 SOUL.md[/bold #00FFCC]",
+        title=f"[bold #00FFCC]✦ {name} 的身份档案[/bold #00FFCC]",
         border_style="#00FFCC", padding=(1, 2),
     ))
 
@@ -147,7 +147,7 @@ def cmd_hire(
     console.print(Panel(
         f"[bold #FF6611]{name}[/bold #FF6611] 已正式入职！🎉\n\n"
         f"  级别：[bold #FFD700]实习生[/bold #FFD700]\n"
-        f"  SOUL：[dim]{profile.soul_path}[/dim]\n\n"
+        f"  档案：[dim]{profile.soul_path}[/dim]\n\n"
         f"运行 [bold]marneo work[/bold] 开始与 {name} 对话。",
         border_style="#FFD700", padding=(1, 2),
     ))

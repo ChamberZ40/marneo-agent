@@ -73,7 +73,7 @@ def cmd_show(name: str = typer.Argument(..., help="员工名称")) -> None:
 
     if p.soul_path.exists():
         soul = p.soul_path.read_text(encoding="utf-8").strip()
-        console.print(Panel(soul, title="[dim]SOUL.md[/dim]",
+        console.print(Panel(soul, title="[dim]身份档案[/dim]",
                             border_style="#555555", padding=(1, 2)))
 
     nxt = next_level(p.level)

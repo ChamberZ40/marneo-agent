@@ -152,7 +152,7 @@ def cmd_new(name: str = typer.Argument(..., help="项目名称")) -> None:
         f"[bold #FF6611]项目 {name} 已创建！[/bold #FF6611]\n\n"
         f"  描述：{project.description or '—'}\n"
         f"  目标：{len(project.goals)} 个\n"
-        f"  AGENT.md → [dim]{project.agent_path}[/dim]\n\n"
+        f"  工作档案 → [dim]{project.agent_path}[/dim]\n\n"
         f"运行 [bold]marneo assign {name}[/bold] 将员工派到此项目。",
         border_style="#FFD700", padding=(1, 2),
     ))
@@ -180,7 +180,7 @@ def cmd_show(name: str = typer.Argument(..., help="项目名称")) -> None:
     ))
     if p.agent_path.exists():
         agent = p.agent_path.read_text(encoding="utf-8").strip()
-        console.print(Panel(agent, title="[dim]AGENT.md[/dim]",
+        console.print(Panel(agent, title="[dim]工作档案[/dim]",
                             border_style="#555555", padding=(1, 2)))
     console.print()
 
