@@ -43,3 +43,18 @@ def test_gateway_register_adapter():
 def test_gateway_session_count_starts_zero():
     mgr = GatewayManager()
     assert mgr._sessions.active_count == 0
+
+
+def test_channel_message_has_attachments_field():
+    from marneo.gateway.base import ChannelMessage
+    msg = ChannelMessage(platform="test", chat_id="c1", text="hello")
+    assert hasattr(msg, "attachments")
+    assert msg.attachments == []
+
+
+def test_channel_message_attachments_with_data():
+    from marneo.gateway.base import ChannelMessage
+    att = {"data": b"bytes", "media_type": "image/jpeg", "filename": "photo.jpg"}
+    msg = ChannelMessage(platform="test", chat_id="c1", text="look", attachments=[att])
+    assert len(msg.attachments) == 1
+    assert msg.attachments[0]["media_type"] == "image/jpeg"

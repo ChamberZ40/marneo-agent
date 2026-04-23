@@ -15,6 +15,7 @@ class ChannelMessage:
     text: str = ""
     msg_id: str = ""
     context_token: str = ""
+    attachments: list[dict[str, Any]] = field(default_factory=list)  # Each: {"data": bytes, "media_type": str, "filename": str}
 
 
 class BaseChannelAdapter(ABC):
