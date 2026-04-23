@@ -127,6 +127,38 @@ def cmd_stop() -> None:
         _pid_file().unlink(missing_ok=True)
 
 
+@gateway_app.command("restart")
+def cmd_restart() -> None:
+    """重启 IM 网关（stop + start）。"""
+    pid = _read_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            _pid_file().unlink(missing_ok=True)
+            console.print(f"[dim]已停止旧进程 (PID: {pid})[/dim]")
+        except OSError:
+            _pid_file().unlink(missing_ok=True)
+    else:
+        console.print("[dim]网关未运行，直接启动...[/dim]")
+
+    import time
+    time.sleep(1)
+
+    log_path = _log_file()
+    pid_path = _pid_file()
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "from marneo.cli.gateway_cmd import _gateway_runner; _gateway_runner()"],
+        stdout=open(log_path, "a"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        cwd=str(Path.home()),
+    )
+    pid_path.write_text(str(proc.pid))
+    console.print(f"[green]✓ 网关已重启 (PID: {proc.pid})[/green]")
+    console.print(f"[dim]日志: {log_path}[/dim]")
+
+
 @gateway_app.command("status")
 def cmd_status() -> None:
     """查看网关状态。"""

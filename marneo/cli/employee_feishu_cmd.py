@@ -73,6 +73,9 @@ def cmd_setup(
     bot_open_id = ""
     try:
         import asyncio
+        import warnings
+        warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
+        warnings.filterwarnings("ignore", message=".*pkg_resources.*")
         from marneo.gateway.adapters.feishu import FeishuChannelAdapter
         from marneo.gateway.manager import GatewayManager
         info = asyncio.run(FeishuChannelAdapter(GatewayManager()).probe_bot(
