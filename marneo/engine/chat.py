@@ -2,6 +2,7 @@
 """Marneo chat engine — streaming conversation."""
 from __future__ import annotations
 
+import base64
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -27,13 +28,14 @@ def _build_content_blocks(
     OpenAI format:   [{"type": "text", ...}, {"type": "image_url", ...}]
     Anthropic format:[{"type": "text", ...}, {"type": "image", "source": {...}}]
     """
-    import base64 as _b64
+    import base64 as _b64  # noqa: F811 (stdlib, already at module level — kept for clarity)
 
     if not attachments:
         return text
 
     is_anthropic = (protocol == "anthropic-compatible")
     blocks: list[dict] = []
+    _MAX_BINARY = 20 * 1024 * 1024  # 20 MB hard cap for binary attachments
 
     for att in attachments:
         data: bytes = att.get("data") or b""
@@ -41,7 +43,12 @@ def _build_content_blocks(
         filename: str = att.get("filename") or "file"
 
         if not data:
-            continue  # skip empty attachments
+            continue
+
+        # Guard oversized binary attachments before base64 encoding
+        if len(data) > _MAX_BINARY and not media_type.startswith("text/"):
+            blocks.append({"type": "text", "text": f"[文件过大: {filename} ({len(data)} 字节，超过20MB限制)]"})
+            continue
 
         b64 = _b64.b64encode(data).decode()
 
@@ -196,8 +203,9 @@ class ChatSession:
                 elif event.type != "done":
                     yield event
 
-            # Fix: remove ghost empty user message injected by send("") on iterations > 0
-            if not call_text and self.messages and self.messages[-1] == {"role": "user", "content": ""}:
+            # Robust ghost-message removal: match any empty user content (string or list)
+            last = self.messages[-1] if self.messages else None
+            if not call_text and last and last.get("role") == "user" and not last.get("content"):
                 self.messages.pop()
 
             if not tool_calls_this_round:
