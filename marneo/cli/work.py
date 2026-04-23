@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -45,6 +46,45 @@ def cmd_work(
         raise typer.Exit(1)
 
     asyncio.run(_work_loop(name))
+
+
+async def _run_with_team(
+    text: str,
+    team: Any,
+    session: Any,
+    tui: Any,
+    display: Any,
+) -> str:
+    """Execute a task in team mode: split → parallel specialists → aggregate → display."""
+    from marneo.collaboration.coordinator import run_team_session  # type: ignore[import]
+
+    _PRI  = "\033[1;38;2;255;102;17m"
+    _DIM  = "\033[38;2;85;85;85m"
+    _RST  = "\033[0m"
+
+    member_str = " + ".join(
+        f"{m.employee}({m.role or '专员'})" for m in team.members
+    )
+    tui.print(f"\n  {_PRI}◆ 团队模式{_RST}  {_DIM}{member_str}{_RST}")
+
+    async def _progress(msg: str) -> None:
+        tui.print(f"  {_DIM}{msg}{_RST}")
+
+    final_reply = await run_team_session(
+        user_message=text,
+        team_config=team,
+        coordinator_engine=session,
+        progress_cb=_progress,
+    )
+
+    if final_reply:
+        display.reset()
+        # Feed in chunks for markdown rendering
+        for i in range(0, len(final_reply), 80):
+            display.on_text(final_reply[i:i + 80])
+        display.finish()
+
+    return final_reply
 
 
 async def _work_loop(employee_name: str) -> None:
@@ -102,6 +142,24 @@ async def _work_loop(employee_name: str) -> None:
     display = tui.make_display()
     session = ChatSession(system_prompt=base_system)
 
+    # ── Team detection ────────────────────────────────────────────────
+    from marneo.collaboration.team import load_team_config  # type: ignore[import]
+    from marneo.collaboration.coordinator import should_use_team  # type: ignore[import]
+    from marneo.project.workspace import get_employee_projects  # type: ignore[import]
+
+    def _get_coordinator_team() -> Any:
+        """Return TeamConfig if this employee is a coordinator in a configured team."""
+        try:
+            for proj in get_employee_projects(employee_name):
+                team = load_team_config(proj.name)
+                if team and team.coordinator == employee_name and team.is_configured():
+                    return team
+        except Exception:
+            pass
+        return None
+
+    _active_team = _get_coordinator_team()
+
     level_str = f"[{profile.level}]" if profile else ""
     proj_count = len(projects) if projects else 0
     proj_info = f"  {_DIM}{proj_count} 个项目{_RST}" if proj_count else ""
@@ -144,6 +202,30 @@ async def _work_loop(employee_name: str) -> None:
         tui.print(f"  {_DIM}You › {text}{_RST}")
         display.reset()
 
+        # ── Team mode ─────────────────────────────────────────────────
+        if _active_team:
+            try:
+                use_team = await should_use_team(text, len(_active_team.members))
+            except Exception:
+                use_team = False
+
+            if use_team:
+                team_reply = await _run_with_team(text, _active_team, session, tui, display)
+                if team_reply:
+                    try:
+                        from marneo.employee.profile import increment_conversation  # type: ignore[import]
+                        from marneo.employee.reports import append_daily_entry  # type: ignore[import]
+                        increment_conversation(employee_name)
+                        append_daily_entry(
+                            employee_name,
+                            f"[Team] {text[:40]} → {team_reply[:60].replace(chr(10), ' ')}",
+                            tag="协作",
+                        )
+                    except Exception:
+                        pass
+                    return
+
+        # ── Solo mode ─────────────────────────────────────────────────
         async for event in session.send(text):
             if event.type == "text":
                 display.on_text(event.content)
