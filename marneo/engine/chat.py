@@ -54,6 +54,67 @@ class ChatSession:
 
         yield ChatEvent(type="done")
 
+    async def send_with_tools(
+        self,
+        user_text: str,
+        registry: Any = None,
+        max_iterations: int = 20,
+    ) -> AsyncIterator["ChatEvent"]:
+        """Agentic loop: send → execute tool calls → loop until LLM returns text.
+
+        Yields ChatEvent types: text, thinking, tool_call, tool_result, error, done.
+        Falls back to plain send() when registry is None or has no tools.
+        """
+        import json as _json
+
+        if registry is None:
+            async for event in self.send(user_text):
+                yield event
+            return
+
+        tool_defs = registry.get_definitions()
+        if not tool_defs:
+            async for event in self.send(user_text):
+                yield event
+            return
+
+        # First call uses user_text; subsequent calls use "" (tool results already in history)
+        call_text = user_text
+
+        for _iteration in range(max_iterations):
+            tool_calls_this_round: list[dict] = []
+
+            async for event in self.send(call_text):
+                if event.type == "tool_call":
+                    try:
+                        tool_calls_this_round.append(_json.loads(event.content))
+                    except Exception:
+                        pass
+                    yield event
+                elif event.type != "done":
+                    yield event
+
+            if not tool_calls_this_round:
+                break
+
+            # Execute tools and inject results into history for next LLM call
+            for tc in tool_calls_this_round:
+                name = tc.get("name", "")
+                args = tc.get("args", {})
+                tc_id = tc.get("id", "")
+                result = registry.dispatch(name, args)
+                yield ChatEvent(type="tool_result", content=result)
+                # Inject as tool message so LLM sees the result
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result,
+                })
+
+            call_text = ""  # subsequent iterations: history has tool results
+
+        yield ChatEvent(type="done")
+
     async def _call_openai(self, provider: ResolvedProvider) -> AsyncIterator[ChatEvent]:
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url)
