@@ -58,7 +58,7 @@ def cmd_hire(
     round_num = 0
 
     while round_num < MAX_ROUNDS:
-        console.print(f"\n[dim]正在生成第 {round_num + 1} 个问题...[/dim]")
+        console.print(f"\n[dim]思考中...[/dim]")
         question = next_question(history, round_num)
         if question is None:
             break
