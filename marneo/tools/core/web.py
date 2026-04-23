@@ -41,7 +41,18 @@ def web_fetch(args: dict[str, Any], **kw: Any) -> str:
         resp = httpx.get(url, headers=_HEADERS, timeout=20, follow_redirects=True)
         resp.raise_for_status()
         content_type = resp.headers.get("content-type", "")
-        text = _html_to_text(resp.text) if "html" in content_type else resp.text
+        if "html" in content_type:
+            text = _html_to_text(resp.text)
+        elif "json" in content_type:
+            # Don't truncate JSON mid-stream — return as-is up to limit, note if truncated
+            raw = resp.text
+            truncated = len(raw) > _MAX_CONTENT
+            text = raw[:_MAX_CONTENT] if truncated else raw
+            if truncated:
+                return tool_result(url=url, content=text, status=resp.status_code,
+                                   note="JSON response truncated — content may be incomplete")
+        else:
+            text = resp.text
         if len(text) > _MAX_CONTENT:
             text = text[:_MAX_CONTENT] + "\n... (truncated)"
         return tool_result(url=url, content=text, status=resp.status_code)
@@ -51,8 +62,10 @@ def web_fetch(args: dict[str, Any], **kw: Any) -> str:
 
 def web_search(args: dict[str, Any], **kw: Any) -> str:
     query = args.get("query", "").strip()
-    limit = min(int(args.get("limit", 5)), 10)
-    if not query:
+    try:
+        limit = max(1, min(int(args.get("limit", 5)), 10))
+    except (ValueError, TypeError):
+        limit = 5
         return tool_error("query is required")
     try:
         import httpx
