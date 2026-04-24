@@ -71,8 +71,18 @@ class SessionMemory:
         return self._retriever
 
     def build_system_prompt(self, query: str = "", skip_retrieval: bool = False) -> str:
-        """Build fixed system prompt: SOUL + Core Memory."""
+        """Build fixed system prompt: capability directive + SOUL + Core Memory."""
         parts: list[str] = []
+
+        # Always prepend the capability directive so LLM knows to use tools
+        capability_directive = (
+            "You are a work-focused digital employee running inside Marneo. "
+            "You are capable, direct, and action-oriented. "
+            "When asked to do something, use your tools to actually do it — "
+            "do NOT say you cannot, and do NOT describe what you would do. "
+            "Prefer tool evidence over recall. Be concise. Report results, not intentions."
+        )
+        parts.append(capability_directive)
 
         soul = self._soul.strip()
         if soul:
