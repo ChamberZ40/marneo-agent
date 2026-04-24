@@ -897,7 +897,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         )
         card_started = await card.start(
             chat_id=msg.chat_id,
-            reply_to_msg_id=msg.msg_id or None,
+            reply_to_msg_id=None,   # don't reply-thread, send as new message so it's visible
             sender_name=msg.user_name or "",
         )
 
