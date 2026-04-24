@@ -171,14 +171,18 @@ registry.register(
     description="Send a Feishu message with @mention to specific users.",
     schema={
         "name": "feishu_send_mention",
-        "description": "Send a Feishu message with @mention. Use feishu_search_user first to get open_id.",
+        "description": (
+            "Send a Feishu message with @mention. "
+            "The sender's open_id is in the message prefix as 'open_id=ou_xxx'. "
+            "Use that directly — no need to call feishu_search_user for the current user."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "chat_id": {"type": "string", "description": "Target chat_id (oc_xxx)"},
                 "mentions": {
                     "type": "array",
-                    "description": "Users to @mention",
+                    "description": "Users to @mention. Use open_id from message context directly.",
                     "items": {
                         "type": "object",
                         "properties": {

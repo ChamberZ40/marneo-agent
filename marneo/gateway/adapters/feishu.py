@@ -459,6 +459,9 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
     def _on_message_event(self, data: Any) -> None:
         loop = self._loop
+        log.info("[Feishu] _on_message_event: loop=%s accepts=%s",
+                 "none" if loop is None else "ok",
+                 self._loop_accepts_callbacks(loop))
         if not self._loop_accepts_callbacks(loop):
             if self._enqueue_pending(data):
                 threading.Thread(
@@ -596,11 +599,16 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if not text.strip() and not attachments:
             return
 
-        # Prefix text with sender name so LLM knows who's talking
-        # In group chats this is especially important for multi-person collaboration
+        # Prefix text with sender info so LLM knows who's talking and can @mention them
+        # sender_id (open_id) is available without any API call — use directly
         display_text = text
-        if sender_name and text.strip():
-            display_text = f"[{sender_name}]: {text}"
+        if text.strip():
+            if sender_id:
+                # Include open_id so LLM can use it directly in feishu_send_mention
+                name_part = f"{sender_name} " if sender_name else ""
+                display_text = f"[{name_part}open_id={sender_id}]: {text}"
+            elif sender_name:
+                display_text = f"[{sender_name}]: {text}"
 
         channel_msg = ChannelMessage(
             platform=self.platform,
@@ -916,20 +924,25 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
         # Stream LLM output to card
         accumulated = ""
+        # In group chats, prefix reply with @sender so they're notified
+        at_prefix = ""
+        if msg.chat_type == "group" and msg.user_id:
+            at_prefix = f'<at id={msg.user_id}></at> '
+
         try:
             async for event in engine.send_with_tools(
                 msg.text, registry=registry, attachments=msg.attachments or None
             ):
                 if event.type == "text" and event.content:
                     accumulated += event.content
-                    await card.update(accumulated)
+                    await card.update(at_prefix + accumulated)
                 elif event.type == "tool_result":
                     log.debug("[Streaming] Tool result: %s", event.content[:100])
         except Exception as exc:
             log.error("[Streaming] LLM error during streaming: %s", exc)
             accumulated = accumulated or f"处理出错：{exc}"
         finally:
-            await card.close(accumulated)
+            await card.close(at_prefix + accumulated)
 
     # -------------------------------------------------------------------------
     # Send reply — with reply fallback (openclaw WITHDRAWN_REPLY_ERROR_CODES)
