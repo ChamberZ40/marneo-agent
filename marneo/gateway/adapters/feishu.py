@@ -533,6 +533,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             return  # unsupported type
 
         # Group policy — at_only requires @mention
+        mentioned_others: list[dict] = []  # other users/bots mentioned in the message
         if chat_type == "group":
             if self._group_policy == "disabled":
                 return
@@ -545,11 +546,15 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 )
                 if not bot_mentioned:
                     return
-                # Strip @mention markers from text
+                # Collect other mentioned users/bots (for LLM context)
                 for m in mentions:
-                    name = getattr(m, "name", "") or ""
-                    if name:
-                        text = text.replace(f"@{name}", "").strip()
+                    m_open_id = getattr(getattr(m, "id", None), "open_id", "") or ""
+                    m_name = getattr(m, "name", "") or ""
+                    if m_open_id and m_open_id != self._bot_open_id:
+                        mentioned_others.append({"open_id": m_open_id, "name": m_name})
+                    # Strip @name from text
+                    if m_name:
+                        text = text.replace(f"@{m_name}", "").strip()
                 # Also strip @_user_N placeholder patterns
                 text = re.sub(r"@_user_\d+", "", text).strip()
 
@@ -604,11 +609,19 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         display_text = text
         if text.strip():
             if sender_id:
-                # Include open_id so LLM can use it directly in feishu_send_mention
                 name_part = f"{sender_name} " if sender_name else ""
                 display_text = f"[{name_part}open_id={sender_id}]: {text}"
             elif sender_name:
                 display_text = f"[{sender_name}]: {text}"
+
+        # Append other mentioned users/bots so LLM can @mention them
+        if mentioned_others:
+            mentions_info = ", ".join(
+                f"{m['name']} (open_id={m['open_id']})" if m.get('name')
+                else f"open_id={m['open_id']}"
+                for m in mentioned_others
+            )
+            display_text += f"\n[群里还提到了: {mentions_info}]"
 
         channel_msg = ChannelMessage(
             platform=self.platform,
