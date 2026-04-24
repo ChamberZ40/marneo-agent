@@ -33,8 +33,8 @@ class ContextBudget:
                     episodic_inject_max=int(raw.get("episodic_inject_max", 1500)),
                     tool_result_max=int(raw.get("tool_result_max", 50_000)),
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("[SessionMemory] config loading failed: %s", exc)
         return cls()
 
 

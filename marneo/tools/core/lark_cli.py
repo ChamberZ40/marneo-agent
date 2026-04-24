@@ -21,8 +21,9 @@ def _get_feishu_credentials() -> tuple[str, str, str]:
             cfg = load_feishu_config(emp)
             if cfg and cfg.is_complete:
                 return cfg.app_id, cfg.app_secret, cfg.domain
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("[lark_cli] credential loading failed: %s", exc)
     return "", "", "feishu"
 
 

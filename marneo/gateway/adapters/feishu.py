@@ -164,7 +164,8 @@ class MessageDeduplicator:
             data = json.loads(self._path.read_text())
             now = time.time()
             return {k: v for k, v in data.items() if now - v < _DEDUP_TTL}
-        except Exception:
+        except Exception as exc:
+            log.warning("[Feishu] Dedup load error: %s", exc)
             return {}
 
     def _save(self) -> None:
@@ -899,7 +900,8 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                     self._manager.dispatch(channel_msg), self._loop
                 )
             return P2CardActionTriggerResponse()
-        except Exception:
+        except Exception as exc:
+            log.warning("[Feishu] Card action handler error: %s", exc)
             return None
 
     # -------------------------------------------------------------------------
@@ -1085,8 +1087,8 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if self._ws_client:
             try:
                 self._ws_client.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("[Feishu] WS client stop error: %s", exc)
             self._ws_client = None
         log.info("[Feishu] Disconnected (employee=%s)", self._employee_name or "—")
 
