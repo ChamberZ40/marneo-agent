@@ -65,13 +65,13 @@ class SessionStore:
                 from marneo.employee.growth import build_level_directive
 
                 profile = load_profile(emp_name)
-                soul = ""
+                soul = f"Your name is {emp_name}.\n\n"
                 if profile:
                     if profile.soul_path.exists():
-                        soul = profile.soul_path.read_text(encoding="utf-8").strip()
+                        soul += profile.soul_path.read_text(encoding="utf-8").strip()
                     directive = build_level_directive(profile)
                     if directive:
-                        soul = f"{soul}\n\n{directive}" if soul else directive
+                        soul = f"{soul}\n\n{directive}"
 
                 sm = SessionMemory(emp_name, soul=soul)
                 system_prompt = sm.build_system_prompt()
