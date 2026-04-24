@@ -149,7 +149,7 @@ class FeishuStreamingCard:
             if not card_id:
                 return False
             message_id = await self._send_card_message(
-                token, chat_id, card_id, reply_to_msg_id=reply_to_msg_id
+                chat_id, card_id, reply_to_msg_id=reply_to_msg_id
             )
             if not message_id:
                 return False
@@ -204,12 +204,14 @@ class FeishuStreamingCard:
 
     async def _send_card_message(
         self,
-        token: str,
         chat_id: str,
         card_id: str,
         reply_to_msg_id: Optional[str] = None,
     ) -> Optional[str]:
-        """Send interactive message referencing card_id. Returns message_id."""
+        """Send interactive message referencing card_id. Returns message_id.
+
+        Note: lark SDK authenticates internally via app_id/app_secret.
+        """
         card_content = json.dumps(
             {"type": "card", "data": {"card_id": card_id}}, ensure_ascii=False
         )
@@ -269,17 +271,16 @@ class FeishuStreamingCard:
     # ── Content updates ───────────────────────────────────────────────────────
 
     async def _put_content(self, text: str) -> None:
-        """PUT content to card element. Updates _current_text."""
+        """PUT content to card element. Updates _current_text only on success."""
         if not self._card_id:
             return
-        self._sequence += 1
-        self._current_text = text
+        seq = self._sequence + 1
         try:
             token = await self._fetch_token()
             payload = json.dumps({
                 "content": text,
-                "sequence": self._sequence,
-                "uuid": f"s_{self._card_id}_{self._sequence}",
+                "sequence": seq,
+                "uuid": f"s_{self._card_id}_{seq}",
             }, ensure_ascii=False)
             async with httpx.AsyncClient(timeout=10) as client:
                 await client.put(
@@ -287,8 +288,11 @@ class FeishuStreamingCard:
                     headers=self._auth_headers(token),
                     content=payload.encode(),
                 )
+            # Only advance state after confirmed delivery
+            self._sequence = seq
+            self._current_text = text
         except Exception as exc:
-            log.debug("[Streaming] _put_content error: %s", exc)
+            log.debug("[Streaming] _put_content error (state not advanced): %s", exc)
 
     async def update(self, text: str) -> None:
         """Update card content with throttle (max 10 updates/sec)."""
@@ -309,7 +313,12 @@ class FeishuStreamingCard:
         await self._put_content(merged)
 
     async def close(self, final_text: str = "") -> None:
-        """Flush pending, do final content update, disable streaming_mode."""
+        """Flush pending, do final content update, disable streaming_mode.
+
+        final_text: the complete authoritative LLM response. If provided,
+        it takes precedence over accumulated streaming state. If empty,
+        we use current + pending as the final text.
+        """
         if self._closed:
             return
         self._closed = True
@@ -317,13 +326,14 @@ class FeishuStreamingCard:
         if not self._card_id:
             return
 
-        # Merge pending + final
-        pending = self._pending_text
-        self._pending_text = None
-        text = merge_streaming_text(
-            merge_streaming_text(self._current_text, pending or ""),
-            final_text,
-        )
+        # Determine final text:
+        # - If caller provides final_text (complete response), use it directly.
+        # - Otherwise merge current + any pending delta.
+        if final_text:
+            text = final_text
+        else:
+            pending = self._pending_text or ""
+            text = merge_streaming_text(self._current_text, pending)
 
         # Final content update if different from what's displayed
         if text and text != self._current_text:
