@@ -192,3 +192,37 @@ registry.register(
     handler=feishu_search_user,
     emoji="🔍",
 )
+
+
+def feishu_create_doc(args: dict[str, Any], **kw: Any) -> str:
+    """Create a Feishu document — delegates to lark_cli docs +create."""
+    title = args.get("title", "").strip()
+    content = args.get("content", "").strip()
+    if not title and not content:
+        return tool_error("title or content is required")
+    from marneo.tools.core.lark_cli import lark_cli
+    cmd = "docs +create"
+    if title:
+        cmd += f' --title "{title}"'
+    if content:
+        cmd += f' --content "{content}"'
+    return lark_cli({"command": cmd})
+
+
+registry.register(
+    name="feishu_create_doc",
+    description="Create a Feishu document with title and markdown content.",
+    schema={
+        "name": "feishu_create_doc",
+        "description": "Create a Feishu cloud document. Use for 'create document', 'write doc', '创建文档' requests.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Document title"},
+                "content": {"type": "string", "description": "Document content in Markdown"},
+            },
+        },
+    },
+    handler=feishu_create_doc,
+    emoji="📄",
+)

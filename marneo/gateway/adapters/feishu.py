@@ -606,15 +606,18 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if not text.strip() and not attachments:
             return
 
-        # Prefix text with Feishu context so LLM knows the platform and can use tools
-        display_text = text
-        if text.strip():
-            chat_type_label = "Feishu group" if chat_type == "group" else "Feishu DM"
-            if sender_id:
-                name_part = f"{sender_name} " if sender_name else ""
-                display_text = f"[{chat_type_label} | {name_part}open_id={sender_id} | chat_id={chat_id}]: {text}"
-            else:
-                display_text = f"[{chat_type_label} | chat_id={chat_id}]: {text}"
+        # Inject rich session context — openclaw pattern:
+        # [timestamp] Feishu[type] | sender_name (open_id) [msg:msg_id] [chat:chat_id]
+        import datetime as _dt
+        now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        chat_label = "Feishu group" if chat_type == "group" else "Feishu DM"
+        name_part = f"{sender_name} " if sender_name else ""
+        context_prefix = (
+            f"[{now}] {chat_label} | "
+            f"{name_part}(open_id={sender_id}) "
+            f"[msg:{msg_id}] [chat:{chat_id}]"
+        )
+        display_text = f"{context_prefix}\n{text}" if text.strip() else ""
 
         # Append other mentioned users/bots so LLM can @mention them
         if mentioned_others:
