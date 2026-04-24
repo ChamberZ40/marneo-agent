@@ -22,6 +22,7 @@ from collections import OrderedDict
 from typing import Any, Optional
 
 from marneo.gateway.base import BaseChannelAdapter, ChannelMessage
+from marneo.gateway.adapters.feishu_streaming import FeishuStreamingCard
 
 log = logging.getLogger(__name__)
 
@@ -495,6 +496,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         chat_type = getattr(msg_body, "chat_type", "p2p") or "p2p"
         msg_id = getattr(msg_body, "message_id", "") or ""
         sender_id = getattr(getattr(sender, "sender_id", None), "open_id", "") or ""
+        sender_name = getattr(sender, "name", "") or ""
 
         # Drop self-sent messages to prevent infinite loop.
         # Only drop messages from THIS bot — other bots' messages are allowed through
@@ -594,6 +596,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             chat_id=chat_id,
             chat_type="group" if chat_type == "group" else "dm",
             user_id=sender_id,
+            user_name=sender_name,
             text=text,
             msg_id=msg_id,
             attachments=attachments,
@@ -857,6 +860,61 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             return P2CardActionTriggerResponse()
         except Exception:
             return None
+
+    # -------------------------------------------------------------------------
+    # Streaming card dispatch (Task 2)
+    # -------------------------------------------------------------------------
+
+    async def process_streaming(
+        self,
+        msg: "ChannelMessage",
+        engine: Any,
+        registry: Any,
+    ) -> None:
+        """Process message with streaming card — typewriter effect.
+
+        Falls back to text send_reply if Card Kit card creation fails.
+        """
+        card = FeishuStreamingCard(
+            app_id=self._app_id,
+            app_secret=self._app_secret,
+            domain=self._domain,
+        )
+        card_started = await card.start(
+            chat_id=msg.chat_id,
+            reply_to_msg_id=msg.msg_id or None,
+            sender_name=msg.user_name or "",
+        )
+
+        if not card_started:
+            log.warning("[Streaming] Card creation failed, falling back to text reply")
+            parts: list[str] = []
+            async for event in engine.send_with_tools(
+                msg.text, registry=registry, attachments=msg.attachments or None
+            ):
+                if event.type == "text" and event.content:
+                    parts.append(event.content)
+            reply = "".join(parts).strip()
+            if reply:
+                await self.send_reply(msg.chat_id, reply)
+            return
+
+        # Stream LLM output to card
+        accumulated = ""
+        try:
+            async for event in engine.send_with_tools(
+                msg.text, registry=registry, attachments=msg.attachments or None
+            ):
+                if event.type == "text" and event.content:
+                    accumulated += event.content
+                    await card.update(accumulated)
+                elif event.type == "tool_result":
+                    log.debug("[Streaming] Tool result: %s", event.content[:100])
+        except Exception as exc:
+            log.error("[Streaming] LLM error during streaming: %s", exc)
+            accumulated = accumulated or f"处理出错：{exc}"
+        finally:
+            await card.close(accumulated)
 
     # -------------------------------------------------------------------------
     # Send reply — with reply fallback (openclaw WITHDRAWN_REPLY_ERROR_CODES)

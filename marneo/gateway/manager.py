@@ -55,6 +55,20 @@ class GatewayManager:
             await self._process(msg, engine, adapter)
 
     async def _process(self, msg: ChannelMessage, engine: Any, adapter: BaseChannelAdapter) -> None:
+        # Use streaming card if adapter supports it (Feishu with Card Kit)
+        if hasattr(adapter, "process_streaming") and getattr(adapter, "_running", False):
+            try:
+                async with asyncio.timeout(REPLY_TIMEOUT):
+                    await adapter.process_streaming(msg, engine, _tool_registry)
+                return
+            except TimeoutError:
+                await adapter.send_reply(msg.chat_id, "处理超时，请重试。")
+                return
+            except Exception as e:
+                log.error("[Gateway] Streaming process error: %s", e)
+                # Fall through to text mode
+
+        # Text fallback: collect all text events then send
         parts: list[str] = []
         try:
             async with asyncio.timeout(REPLY_TIMEOUT):
