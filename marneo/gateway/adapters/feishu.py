@@ -227,6 +227,9 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._chat_locks_meta: threading.Lock = threading.Lock()
 
+        # Sender name cache: open_id → display_name (persistent for session lifetime)
+        self._sender_name_cache: dict[str, str] = {}
+
         # Pending inbound queue (hermes-agent pattern)
         self._pending_inbound: list[Any] = []
         self._pending_inbound_lock = threading.Lock()
@@ -496,7 +499,9 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         chat_type = getattr(msg_body, "chat_type", "p2p") or "p2p"
         msg_id = getattr(msg_body, "message_id", "") or ""
         sender_id = getattr(getattr(sender, "sender_id", None), "open_id", "") or ""
-        sender_name = getattr(sender, "name", "") or ""
+
+        # Resolve sender display name (cached, no repeated API calls)
+        sender_name = await self._resolve_sender_name(sender_id)
 
         # Drop self-sent messages to prevent infinite loop.
         # Only drop messages from THIS bot — other bots' messages are allowed through
@@ -591,13 +596,19 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if not text.strip() and not attachments:
             return
 
+        # Prefix text with sender name so LLM knows who's talking
+        # In group chats this is especially important for multi-person collaboration
+        display_text = text
+        if sender_name and text.strip():
+            display_text = f"[{sender_name}]: {text}"
+
         channel_msg = ChannelMessage(
             platform=self.platform,
             chat_id=chat_id,
             chat_type="group" if chat_type == "group" else "dm",
             user_id=sender_id,
             user_name=sender_name,
-            text=text,
+            text=display_text,
             msg_id=msg_id,
             attachments=attachments,
         )
@@ -661,6 +672,42 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             if chat_id not in self._chat_locks:
                 self._chat_locks[chat_id] = asyncio.Lock()
             return self._chat_locks[chat_id]
+
+    async def _resolve_sender_name(self, open_id: str) -> str:
+        """Resolve open_id → display name, cached for session lifetime.
+
+        Calls /contact/v3/users/{open_id} once per unknown user.
+        Returns empty string on failure (non-critical).
+        """
+        if not open_id or open_id == self._bot_open_id:
+            return ""
+        if open_id in self._sender_name_cache:
+            return self._sender_name_cache[open_id]
+        try:
+            import httpx
+            token_resp = await httpx.AsyncClient(timeout=8).post(
+                f"{'https://open.larksuite.com' if self._domain == 'lark' else 'https://open.feishu.cn'}"
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": self._app_id, "app_secret": self._app_secret},
+            )
+            token = token_resp.json().get("tenant_access_token", "")
+            if not token:
+                return ""
+            base = "https://open.larksuite.com" if self._domain == "lark" else "https://open.feishu.cn"
+            resp = await httpx.AsyncClient(timeout=8).get(
+                f"{base}/open-apis/contact/v3/users/{open_id}",
+                params={"user_id_type": "open_id"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            data = resp.json()
+            name = (data.get("data", {}).get("user", {}).get("name", "") or "").strip()
+            self._sender_name_cache[open_id] = name
+            log.debug("[Feishu] Resolved sender %s → %s", open_id[:12], name)
+            return name
+        except Exception as exc:
+            log.debug("[Feishu] _resolve_sender_name failed: %s", exc)
+            self._sender_name_cache[open_id] = ""  # cache failure to avoid retry spam
+            return ""
 
     # -------------------------------------------------------------------------
     # Dispatch with reaction lifecycle
