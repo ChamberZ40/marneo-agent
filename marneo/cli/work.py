@@ -99,51 +99,30 @@ async def _work_loop(employee_name: str) -> None:
 
     profile = load_profile(employee_name)
 
-    # Build system prompt
-    base_system = (
-        f"你是 {employee_name}，一名专注的数字员工。"
-        "帮助用户推进他们的项目目标。"
-        "保持专业、高效的沟通风格。"
-    )
+    # Build system prompt via SessionMemory (replaces inline SOUL+skills+projects)
+    from marneo.memory.session_memory import SessionMemory
+    soul = ""
     if profile:
-        directive = build_level_directive(profile)
-        if directive:
-            base_system = f"{base_system}\n\n{directive}"
         if profile.soul_path.exists():
             soul = profile.soul_path.read_text(encoding="utf-8").strip()
-            base_system = f"{soul}\n\n{base_system}"
+        directive = build_level_directive(profile)
+        if directive:
+            soul = f"{soul}\n\n{directive}" if soul else directive
 
-    # Inject project context
+    _session_memory = SessionMemory(employee_name, soul=soul)
+    base_system = _session_memory.build_system_prompt()
+    session = ChatSession(system_prompt=base_system)
+    session._session_memory = _session_memory
+
+    # Derive projects count for welcome message
     try:
         from marneo.project.workspace import get_employee_projects  # type: ignore[import]
         projects = get_employee_projects(employee_name)
-        if projects:
-            proj_parts: list[str] = []
-            for proj in projects:
-                proj_parts.append(f"## 项目：{proj.name}")
-                if proj.description:
-                    proj_parts.append(f"描述：{proj.description}")
-                if proj.goals:
-                    proj_parts.append("目标：" + "、".join(proj.goals[:3]))
-                if proj.agent_path.exists():
-                    proj_parts.append(proj.agent_path.read_text(encoding="utf-8").strip())
-            if proj_parts:
-                base_system += "\n\n# 当前项目\n\n" + "\n\n".join(proj_parts)
     except Exception:
         projects = []
 
-    # Inject skills
-    try:
-        from marneo.project.skills import get_skills_context  # type: ignore[import]
-        skills_ctx = get_skills_context(employee_name)
-        if skills_ctx:
-            base_system += "\n\n" + skills_ctx
-    except Exception:
-        pass
-
     tui = ChatTUI(employee_name=employee_name)
     display = tui.make_display()
-    session = ChatSession(system_prompt=base_system)
 
     # ── Team detection ────────────────────────────────────────────────
     from marneo.collaboration.team import load_team_config  # type: ignore[import]
@@ -238,6 +217,13 @@ async def _work_loop(employee_name: str) -> None:
                 display.on_error(event.content)
 
         reply = display.finish()
+
+        # Extract episode from this turn (after skills/reports tracking)
+        if reply.strip() and len(reply) > 50:
+            try:
+                _session_memory.add_episode_from_turn(text, reply)
+            except Exception:
+                pass
 
         # Post-turn tracking
         try:

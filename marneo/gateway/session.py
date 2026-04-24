@@ -42,45 +42,33 @@ class SessionStore:
     async def _create_engine(self, platform: str = "") -> Any:
         from marneo.engine.chat import ChatSession
 
-        base = "你是一名专注的数字员工，通过 IM 渠道与用户协作。保持专业、简洁的沟通风格。"
-        system = base
+        base_system = "你是一名专注的数字员工，通过 IM 渠道与用户协作。保持专业、简洁的沟通风格。"
 
-        # Load employee context for platforms like "feishu:GAI", "telegram:GAI"
         if ":" in platform:
             emp_name = platform.split(":", 1)[1]
             try:
+                from marneo.memory.session_memory import SessionMemory
                 from marneo.employee.profile import load_profile
                 from marneo.employee.growth import build_level_directive
+
                 profile = load_profile(emp_name)
+                soul = ""
                 if profile:
                     if profile.soul_path.exists():
                         soul = profile.soul_path.read_text(encoding="utf-8").strip()
-                        system = f"{soul}\n\n{base}"
                     directive = build_level_directive(profile)
                     if directive:
-                        system = f"{system}\n\n{directive}"
-                    # Inject project context
-                    try:
-                        from marneo.project.workspace import get_employee_projects
-                        projects = get_employee_projects(emp_name)
-                        if projects:
-                            parts: list[str] = []
-                            for proj in projects:
-                                parts.append(f"## 项目：{proj.name}")
-                                if proj.description:
-                                    parts.append(f"描述：{proj.description}")
-                                if proj.goals:
-                                    parts.append("目标：" + "、".join(proj.goals[:3]))
-                                if proj.agent_path.exists():
-                                    parts.append(proj.agent_path.read_text(encoding="utf-8").strip())
-                            if parts:
-                                system += "\n\n# 当前项目\n\n" + "\n\n".join(parts)
-                    except Exception:
-                        pass
-            except Exception as e:
-                log.warning("[Session] Failed to load employee context for %s: %s", emp_name, e)
+                        soul = f"{soul}\n\n{directive}" if soul else directive
 
-        return ChatSession(system_prompt=system)
+                sm = SessionMemory(emp_name, soul=soul)
+                system_prompt = sm.build_system_prompt()
+                engine = ChatSession(system_prompt=system_prompt)
+                engine._session_memory = sm  # attach for use in dispatch
+                return engine
+            except Exception as e:
+                log.warning("[Session] SessionMemory init failed for %s: %s", emp_name, e)
+
+        return ChatSession(system_prompt=base_system)
 
     def _evict(self) -> None:
         for k in [k for k, e in self._sessions.items() if e.expired]:
