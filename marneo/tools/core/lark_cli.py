@@ -128,9 +128,12 @@ registry.register(
         "name": "lark_cli",
         "description": (
             "Execute any lark-cli command to interact with Feishu/Lark. "
-            "Examples: 'calendar +agenda', 'docs +create --content \"...\"', "
-            "'base records +create --table-id xxx', 'im +messages-send --chat-id oc_xxx --text hello'. "
-            "Run as bot identity automatically. Use 'schema <command>' to explore available parameters."
+            "Key commands: "
+            "'chat members --chat-id oc_xxx' (list group members with open_id to find who to @mention), "
+            "'calendar +agenda', "
+            "'docs +create --content \"...\"', "
+            "'im +messages-send --chat-id oc_xxx --text hello'. "
+            "Run as bot identity automatically. Use 'schema <command>' to explore parameters."
         ),
         "parameters": {
             "type": "object",

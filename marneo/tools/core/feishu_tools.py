@@ -141,25 +141,26 @@ def feishu_search_user(args: dict[str, Any], **kw: Any) -> str:
 
 registry.register(
     name="feishu_send_mention",
-    description="Send a Feishu message with @mention to specific users.",
+    description="Send a Feishu message with @mention to specific users or bots.",
     schema={
         "name": "feishu_send_mention",
         "description": (
             "Send a Feishu message with @mention. "
-            "The sender's open_id is in the message prefix as 'open_id=ou_xxx'. "
-            "Use that directly — no need to call feishu_search_user for the current user."
+            "To find someone's open_id: use lark_cli with 'chat members --chat-id <chat_id>' "
+            "to list group members and find the target person. "
+            "The sender's open_id and chat_id are in the message prefix."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "chat_id": {"type": "string", "description": "Target chat_id (oc_xxx)"},
+                "chat_id": {"type": "string", "description": "Target chat_id (oc_xxx) — available from message context"},
                 "mentions": {
                     "type": "array",
-                    "description": "Users to @mention. Use open_id from message context directly.",
+                    "description": "Users to @mention. Get open_id from lark_cli chat members list.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "open_id": {"type": "string", "description": "User open_id (ou_xxx) or 'all'"},
+                            "open_id": {"type": "string", "description": "User open_id (ou_xxx)"},
                             "name": {"type": "string", "description": "User display name"},
                         },
                     },
