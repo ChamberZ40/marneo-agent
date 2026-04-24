@@ -6,12 +6,16 @@ Write paths: manual CLI, LLM tool, episode promotion.
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 DEFAULT_MAX_CHARS = 1000
 
@@ -35,12 +39,13 @@ class CoreMemory:
             if end != -1:
                 try:
                     meta = yaml.safe_load(text[3:end]) or {}
-                except Exception:
-                    pass
+                except yaml.YAMLError as exc:
+                    log.warning("core.md has malformed frontmatter, ignoring: %s", exc)
+                    meta = {}
                 body = text[end + 3:].strip()
         entries = []
         for line in body.splitlines():
-            m = re.match(r"^[-*]\s+(.+?)(?:\s+\[(.+?)\])?$", line.strip())
+            m = re.match(r"^[-*]\s+(.+?)(?:\s+\[([a-z_]+)\])?$", line.strip())
             if m:
                 entries.append({"content": m.group(1).strip(), "source": m.group(2) or "manual"})
         return meta, entries
@@ -51,7 +56,9 @@ class CoreMemory:
         lines = [f"---\n{yaml.dump(meta, allow_unicode=True)}---\n\n# 核心记忆\n"]
         for e in entries:
             lines.append(f"- {e['content']} [{e['source']}]")
-        self._path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp, self._path)
 
     @property
     def content(self) -> str:
@@ -86,8 +93,10 @@ class CoreMemory:
         for e in entries:
             lines.append(f"- {e['content']}")
         text = "\n".join(lines)
+        TRUNCATION_SUFFIX = "\n...(已截断)"
         if len(text) > self._max_chars:
-            text = text[:self._max_chars - 20] + "\n...(已截断)"
+            budget = self._max_chars - len(TRUNCATION_SUFFIX)
+            text = (text[:budget] + TRUNCATION_SUFFIX) if budget > 0 else TRUNCATION_SUFFIX
         return text
 
     @classmethod

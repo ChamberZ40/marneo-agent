@@ -28,7 +28,7 @@ def test_as_prompt_includes_header(tmp_path):
 def test_enforces_char_limit(tmp_path):
     cm = CoreMemory(tmp_path / "core.md", max_chars=100)
     cm.add("A" * 200, source="manual")
-    assert len(cm.as_prompt()) <= 150  # header + truncation notice
+    assert len(cm.as_prompt()) <= 100 + len("\n...(已截断)")
 
 
 def test_list_entries(tmp_path):
