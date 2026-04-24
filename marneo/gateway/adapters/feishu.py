@@ -545,6 +545,8 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                     if self._bot_open_id else bool(mentions)
                 )
                 if not bot_mentioned:
+                    log.info("[Feishu] Group msg dropped: bot not @mentioned (chat=%s policy=at_only bot_id=%s mentions=%d)",
+                             chat_id[:12], self._bot_open_id[:12] if self._bot_open_id else "none", len(mentions))
                     return
                 # Collect other mentioned users/bots (for LLM context)
                 for m in mentions:
