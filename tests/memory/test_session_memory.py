@@ -17,12 +17,13 @@ def test_build_system_prompt_fixed_size(tmp_path):
     sm._retriever = None
     sm._store = None
     sm._employee_name = "test"
-    sm._budget = ContextBudget(system_prompt_max=200, core_memory_max=100)
+    sm._budget = ContextBudget(system_prompt_max=1000, core_memory_max=100)
 
     prompt = sm.build_system_prompt("", skip_retrieval=True)
-    assert len(prompt) <= 300
+    assert len(prompt) <= 1100
     assert "老七" in prompt
     assert "核心记忆" in prompt
+    assert "work-focused digital employee" in prompt  # capability directive always present
 
 
 def test_trim_working_memory():
