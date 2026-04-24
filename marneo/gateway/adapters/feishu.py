@@ -458,6 +458,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
     # -------------------------------------------------------------------------
 
     def _on_message_event(self, data: Any) -> None:
+        log.info("[Feishu] Message event received from WS")
         loop = self._loop
         if not self._loop_accepts_callbacks(loop):
             if self._enqueue_pending(data):
