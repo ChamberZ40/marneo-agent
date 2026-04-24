@@ -65,7 +65,9 @@ class SessionStore:
                 from marneo.employee.growth import build_level_directive
 
                 profile = load_profile(emp_name)
-                soul = f"Your name is {emp_name}.\n\n"
+                # Use display name from profile, fallback to directory name
+                display_name = getattr(profile, 'name', emp_name) if profile else emp_name
+                soul = f"Your name is {display_name} (id: {emp_name}).\n\n"
                 if profile:
                     if profile.soul_path.exists():
                         soul += profile.soul_path.read_text(encoding="utf-8").strip()
