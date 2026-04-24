@@ -459,7 +459,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
     def _on_message_event(self, data: Any) -> None:
         loop = self._loop
-        log.info("[Feishu] _on_message_event: loop=%s accepts=%s",
+        log.debug("[Feishu] _on_message_event: loop=%s accepts=%s",
                  "none" if loop is None else "ok",
                  self._loop_accepts_callbacks(loop))
         if not self._loop_accepts_callbacks(loop):
@@ -545,7 +545,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                     if self._bot_open_id else bool(mentions)
                 )
                 if not bot_mentioned:
-                    log.info("[Feishu] Group msg dropped: bot not @mentioned (chat=%s policy=at_only bot_id=%s mentions=%d)",
+                    log.debug("[Feishu] Group msg dropped: bot not @mentioned (chat=%s policy=at_only bot_id=%s mentions=%d)",
                              chat_id[:12], self._bot_open_id[:12] if self._bot_open_id else "none", len(mentions))
                     return
                 # Collect other mentioned users/bots (for LLM context)
