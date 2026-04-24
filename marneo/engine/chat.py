@@ -192,7 +192,7 @@ class ChatSession:
 
             # Pass attachments only on the first call
             call_attachments = attachments if _first_call else None
-            async for event in self.send(call_text, attachments=call_attachments):
+            async for event in self._send_with_tool_defs(call_text, tool_defs, call_attachments):
                 if event.type == "tool_call":
                     try:
                         tool_calls_this_round.append(_json.loads(event.content))
@@ -233,7 +233,164 @@ class ChatSession:
 
         yield ChatEvent(type="done")
 
-    async def _call_openai(self, provider: ResolvedProvider) -> AsyncIterator[ChatEvent]:
+    async def _send_with_tool_defs(
+        self,
+        user_text: str,
+        tool_defs: list,
+        attachments: "list[dict] | None" = None,
+    ) -> AsyncIterator["ChatEvent"]:
+        """Call LLM with tool definitions. Yields text and tool_call events."""
+        import json as _json
+
+        provider = resolve_provider()
+
+        # Build content with attachments if any
+        if user_text:
+            content = _build_content_blocks(
+                text=user_text,
+                attachments=attachments or [],
+                protocol=provider.protocol,
+            )
+            self.messages.append({"role": "user", "content": content})
+
+        collected_text = ""
+        tool_calls_raw: list[dict] = []
+
+        try:
+            if provider.protocol == "anthropic-compatible":
+                async for event in self._call_anthropic_with_tools(provider, tool_defs):
+                    if event.type == "text":
+                        collected_text += event.content
+                    elif event.type == "tool_call":
+                        tool_calls_raw.append(_json.loads(event.content))
+                    yield event
+            else:
+                async for event in self._call_openai_with_tools(provider, tool_defs):
+                    if event.type == "text":
+                        collected_text += event.content
+                    elif event.type == "tool_call":
+                        tool_calls_raw.append(_json.loads(event.content))
+                    yield event
+
+            # Append to history
+            if collected_text:
+                self.messages.append({"role": "assistant", "content": collected_text})
+            if tool_calls_raw:
+                self.messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {"name": tc["name"], "arguments": _json.dumps(tc.get("args", {}))},
+                        }
+                        for tc in tool_calls_raw
+                    ],
+                })
+
+        except Exception as exc:
+            log.error("Chat with tools error: %s", exc)
+            yield ChatEvent(type="error", content=str(exc))
+
+        yield ChatEvent(type="done")
+
+    async def _call_openai_with_tools(
+        self, provider: ResolvedProvider, tool_defs: list
+    ) -> AsyncIterator["ChatEvent"]:
+        """OpenAI-compatible streaming call with function calling."""
+        import json as _json
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url)
+        msgs: list[dict] = []
+        if self.system_prompt:
+            msgs.append({"role": "system", "content": self.system_prompt})
+        msgs.extend(self.messages)
+
+        stream = await client.chat.completions.create(
+            model=provider.model,
+            messages=msgs,  # type: ignore[arg-type]
+            tools=tool_defs,
+            tool_choice="auto",
+            max_tokens=4096,
+            stream=True,
+        )
+
+        tc_accum: dict[int, dict] = {}
+
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta is None:
+                continue
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                yield ChatEvent(type="thinking", content=reasoning)
+            if delta.content:
+                yield ChatEvent(type="text", content=delta.content)
+            for tc_delta in (delta.tool_calls or []):
+                idx = tc_delta.index
+                if idx not in tc_accum:
+                    tc_accum[idx] = {"id": "", "name": "", "args": ""}
+                if tc_delta.id:
+                    tc_accum[idx]["id"] = tc_delta.id
+                if tc_delta.function:
+                    if tc_delta.function.name:
+                        tc_accum[idx]["name"] += tc_delta.function.name
+                    if tc_delta.function.arguments:
+                        tc_accum[idx]["args"] += tc_delta.function.arguments
+
+        for tc in tc_accum.values():
+            try:
+                args = _json.loads(tc["args"]) if tc["args"] else {}
+            except Exception:
+                args = {}
+            yield ChatEvent(type="tool_call", content=_json.dumps({
+                "id": tc["id"], "name": tc["name"], "args": args
+            }))
+
+    async def _call_anthropic_with_tools(
+        self, provider: ResolvedProvider, tool_defs: list
+    ) -> AsyncIterator["ChatEvent"]:
+        """Anthropic streaming call with tool_use blocks."""
+        import json as _json
+        import anthropic
+
+        client = anthropic.AsyncAnthropic(api_key=provider.api_key, base_url=provider.base_url)
+
+        anthropic_tools = []
+        for td in tool_defs:
+            fn = td.get("function", {})
+            anthropic_tools.append({
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+            })
+
+        kwargs: dict = {
+            "model": provider.model,
+            "max_tokens": 4096,
+            "messages": list(self.messages),
+            "tools": anthropic_tools,
+        }
+        if self.system_prompt:
+            kwargs["system"] = self.system_prompt
+
+        async with client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                if text:
+                    yield ChatEvent(type="text", content=text)
+
+        final = await stream.get_final_message()
+        for block in final.content:
+            if hasattr(block, "type") and block.type == "tool_use":
+                yield ChatEvent(type="tool_call", content=_json.dumps({
+                    "id": block.id, "name": block.name, "args": block.input,
+                }))
+
+
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url)
 

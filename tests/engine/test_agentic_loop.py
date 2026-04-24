@@ -26,11 +26,11 @@ async def test_send_with_tools_no_tool_call(registry_with_echo):
     """When LLM returns only text, stream it directly."""
     session = ChatSession(system_prompt="test")
 
-    async def fake_send(text, **kwargs):
+    async def fake_tool_defs(text, tool_defs, attachments=None):
         yield ChatEvent(type="text", content="hello")
         yield ChatEvent(type="done")
 
-    with patch.object(session, "send", side_effect=fake_send):
+    with patch.object(session, "_send_with_tool_defs", side_effect=fake_tool_defs):
         events = []
         async for e in session.send_with_tools("hi", registry=registry_with_echo):
             events.append(e)
@@ -45,7 +45,7 @@ async def test_send_with_tools_executes_tool_and_continues(registry_with_echo):
     session = ChatSession(system_prompt="test")
     call_count = 0
 
-    async def fake_send(text, **kwargs):
+    async def fake_tool_defs(text, tool_defs, attachments=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -57,7 +57,7 @@ async def test_send_with_tools_executes_tool_and_continues(registry_with_echo):
             yield ChatEvent(type="text", content="done")
             yield ChatEvent(type="done")
 
-    with patch.object(session, "send", side_effect=fake_send):
+    with patch.object(session, "_send_with_tool_defs", side_effect=fake_tool_defs):
         events = []
         async for e in session.send_with_tools("hi", registry=registry_with_echo):
             events.append(e)
@@ -81,11 +81,11 @@ async def test_send_with_tools_respects_max_iterations():
     )
     session = ChatSession()
 
-    async def always_calls_tool(text, **kwargs):
+    async def always_calls_tool(text, tool_defs, attachments=None):
         yield ChatEvent(type="tool_call", content=json.dumps({"id": "t1", "name": "loop_tool", "args": {}}))
         yield ChatEvent(type="done")
 
-    with patch.object(session, "send", side_effect=always_calls_tool):
+    with patch.object(session, "_send_with_tool_defs", side_effect=always_calls_tool):
         events = []
         async for e in session.send_with_tools("go", registry=reg, max_iterations=3):
             events.append(e)
