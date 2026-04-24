@@ -610,9 +610,11 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if text.strip():
             if sender_id:
                 name_part = f"{sender_name} " if sender_name else ""
-                display_text = f"[{name_part}open_id={sender_id}]: {text}"
+                display_text = f"[{name_part}open_id={sender_id} chat_id={chat_id}]: {text}"
             elif sender_name:
-                display_text = f"[{sender_name}]: {text}"
+                display_text = f"[{sender_name} chat_id={chat_id}]: {text}"
+            else:
+                display_text = f"[chat_id={chat_id}]: {text}"
 
         # Append other mentioned users/bots so LLM can @mention them
         if mentioned_others:

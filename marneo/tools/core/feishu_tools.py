@@ -108,58 +108,31 @@ def feishu_send_mention(args: dict[str, Any], **kw: Any) -> str:
 
 
 def feishu_search_user(args: dict[str, Any], **kw: Any) -> str:
-    """Search Feishu users by name/email/phone to get their open_id for @mention."""
+    """Search Feishu users via lark-cli (uses existing App permissions)."""
     query = args.get("query", "").strip()
     if not query:
         return tool_error("query is required")
 
     try:
-        from marneo.employee.feishu_config import list_configured_employees, load_feishu_config
-        app_id = app_secret = domain = ""
-        for emp in list_configured_employees():
-            cfg = load_feishu_config(emp)
-            if cfg and cfg.is_complete:
-                app_id, app_secret, domain = cfg.app_id, cfg.app_secret, cfg.domain
-                break
-        if not app_id:
-            return tool_error("No Feishu credentials configured")
+        import shutil, subprocess
+        lark_bin = shutil.which("lark-cli")
+        if not lark_bin:
+            return tool_error("lark-cli not installed")
 
-        import asyncio
-        import httpx
-
-        async def _search() -> dict:
-            base = "https://open.larksuite.com" if domain == "lark" else "https://open.feishu.cn"
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.post(
-                    f"{base}/open-apis/auth/v3/tenant_access_token/internal",
-                    json={"app_id": app_id, "app_secret": app_secret},
-                )
-                token = r.json().get("tenant_access_token", "")
-                if not token:
-                    return {"error": "Failed to get token"}
-
-                r2 = await client.get(
-                    f"{base}/open-apis/search/v1/user",
-                    params={"query": query, "page_size": 10},
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                data = r2.json()
-                if data.get("code") != 0:
-                    return {"error": f"Search failed: {data.get('msg')}"}
-
-                users = []
-                for u in data.get("data", {}).get("results", []):
-                    users.append({
-                        "name": u.get("name", ""),
-                        "open_id": u.get("open_id", ""),
-                        "email": u.get("primary_email", ""),
-                    })
-                return {"users": users, "count": len(users)}
-
-        from marneo.tools.registry import _run_async
-        result = _run_async(lambda: _search())
-        return json.dumps(result, ensure_ascii=False)
-
+        result = subprocess.run(
+            [lark_bin, "contact", "+search", "--keyword", query,
+             "--as", "bot", "--format", "json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            # fallback: try without +search shortcut
+            result = subprocess.run(
+                [lark_bin, "contact", "users", "batch_get_id",
+                 "--emails", query, "--as", "bot", "--format", "json"],
+                capture_output=True, text=True, timeout=15,
+            )
+        output = result.stdout.strip() or result.stderr.strip()
+        return tool_result(raw=output, query=query)
     except Exception as exc:
         return tool_error(str(exc))
 
