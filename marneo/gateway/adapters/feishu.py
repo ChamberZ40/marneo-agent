@@ -606,17 +606,15 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if not text.strip() and not attachments:
             return
 
-        # Prefix text with sender info so LLM knows who's talking and can @mention them
-        # sender_id (open_id) is available without any API call — use directly
+        # Prefix text with Feishu context so LLM knows the platform and can use tools
         display_text = text
         if text.strip():
+            chat_type_label = "Feishu group" if chat_type == "group" else "Feishu DM"
             if sender_id:
                 name_part = f"{sender_name} " if sender_name else ""
-                display_text = f"[{name_part}open_id={sender_id} chat_id={chat_id}]: {text}"
-            elif sender_name:
-                display_text = f"[{sender_name} chat_id={chat_id}]: {text}"
+                display_text = f"[{chat_type_label} | {name_part}open_id={sender_id} | chat_id={chat_id}]: {text}"
             else:
-                display_text = f"[chat_id={chat_id}]: {text}"
+                display_text = f"[{chat_type_label} | chat_id={chat_id}]: {text}"
 
         # Append other mentioned users/bots so LLM can @mention them
         if mentioned_others:
