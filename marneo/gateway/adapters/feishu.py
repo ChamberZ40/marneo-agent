@@ -496,6 +496,13 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         msg_id = getattr(msg_body, "message_id", "") or ""
         sender_id = getattr(getattr(sender, "sender_id", None), "open_id", "") or ""
 
+        # Drop self-sent messages to prevent infinite loop.
+        # Only drop messages from THIS bot — other bots' messages are allowed through
+        # so multi-agent @mention collaboration works (hermes pattern).
+        if self._is_self_sent_bot_message(sender):
+            log.debug("[Feishu] Dropping self-sent bot event: %s", msg_id)
+            return
+
         try:
             content = json.loads(content_str)
         except Exception:
@@ -628,6 +635,22 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             return " ".join(p for p in parts if p).strip()
         except Exception:
             return "[富文本消息]"
+
+    def _is_self_sent_bot_message(self, sender: Any) -> bool:
+        """Return True only for events emitted by THIS bot.
+
+        Ported from hermes-agent: drop self-sent messages to prevent
+        infinite loops, but allow other bots' messages through so
+        multi-agent @mention collaboration works in group chats.
+        """
+        sender_type = str(getattr(sender, "sender_type", "") or "").strip().lower()
+        if sender_type not in {"bot", "app"}:
+            return False
+        sender_id_obj = getattr(sender, "sender_id", None)
+        sender_open_id = str(getattr(sender_id_obj, "open_id", "") or "").strip()
+        if self._bot_open_id and sender_open_id == self._bot_open_id:
+            return True
+        return False
 
     def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
         """Get or create per-chat asyncio lock (like openclaw's createChatQueue)."""
