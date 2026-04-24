@@ -2,9 +2,12 @@
 """Episodic Memory store — SQLite backend for work experience and skill index."""
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 import time
+
+_id_counter = itertools.count()
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -76,7 +79,7 @@ class EpisodeStore:
         )
 
     def add(self, ep: Episode) -> str:
-        ep_id = ep.id or f"ep_{int(time.time() * 1000)}"
+        ep_id = ep.id or f"ep_{int(time.time() * 1000)}_{next(_id_counter)}"
         created = ep.created_at or time.strftime("%Y-%m-%d")
         with self._conn() as conn:
             conn.execute(
