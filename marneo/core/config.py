@@ -28,9 +28,19 @@ class ProviderConfig:
 
 
 @dataclass
+class ContextBudgetConfig:
+    system_prompt_max: int = 4000
+    core_memory_max: int = 1000
+    working_memory_turns: int = 20
+    episodic_inject_max: int = 1500
+    tool_result_max: int = 50_000
+
+
+@dataclass
 class MarneoConfig:
     provider: ProviderConfig | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    context_budget: ContextBudgetConfig = field(default_factory=ContextBudgetConfig)
 
 
 def _resolve_secret(value: str) -> str:
@@ -65,7 +75,19 @@ def load_config() -> MarneoConfig:
             protocol=str(p.get("protocol", "openai-compatible")),
         )
 
-    return MarneoConfig(provider=provider, raw=raw)
+    config = MarneoConfig(provider=provider, raw=raw)
+
+    raw_budget = raw.get("context_budget", {}) or {}
+    if isinstance(raw_budget, dict) and raw_budget:
+        config.context_budget = ContextBudgetConfig(
+            system_prompt_max=int(raw_budget.get("system_prompt_max", 4000)),
+            core_memory_max=int(raw_budget.get("core_memory_max", 1000)),
+            working_memory_turns=int(raw_budget.get("working_memory_turns", 20)),
+            episodic_inject_max=int(raw_budget.get("episodic_inject_max", 1500)),
+            tool_result_max=int(raw_budget.get("tool_result_max", 50_000)),
+        )
+
+    return config
 
 
 def save_config(provider: ProviderConfig) -> Path:
