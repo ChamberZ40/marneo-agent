@@ -242,7 +242,11 @@ class ChatSession:
                 name = tc.get("name", "")
                 args = tc.get("args", {})
                 tc_id = tc.get("id", "")
-                result = registry.dispatch(name, args)
+                # Use async_dispatch to avoid blocking the event loop for async tools
+                if hasattr(registry, "async_dispatch"):
+                    result = await registry.async_dispatch(name, args)
+                else:
+                    result = registry.dispatch(name, args)
                 yield ChatEvent(type="tool_result", content=result)
                 self.messages.append({
                     "role": "tool",

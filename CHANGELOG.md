@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.6] - 2026-04-27
+
+### Added
+- **`ask_user` tool** (hermes clarify pattern): LLM sends interactive Feishu card with buttons, waits for user response via `card.action.trigger` callback. Supports button choices (max 4) and free-text reply mode. 300s timeout.
+- **`PendingQuestionStore`**: thread-safe async Future coordination between card callback and agentic loop
+- **Feishu one-click app creation**: `marneo employee add-feishu` now supports QR code scan to auto-create Feishu app via `lark.register_app()` (lark-oapi 1.5.5), no need to manually visit developer console
+- **`async_dispatch`** in ToolRegistry for async tool handlers (ask_user is async)
+- 16 new tests (261 total)
+
 ## [0.1.5] - 2026-04-27
 
 ### Added

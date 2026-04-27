@@ -102,6 +102,30 @@ class ToolRegistry:
             log.error("[Tools] %s dispatch error: %s", name, exc, exc_info=True)
             return tool_error(f"{type(exc).__name__}: {exc}")
 
+    async def async_dispatch(self, name: str, args: dict[str, Any], **kwargs: Any) -> str:
+        """Dispatch a tool call, awaiting async handlers natively.
+
+        Preferred over dispatch() when called from an async context, because
+        it avoids blocking the event loop for async tools (e.g. ask_user).
+        Sync handlers run directly (same behavior as dispatch()).
+        """
+        entry = self.get_entry(name)
+        if entry is None:
+            return tool_error(f"Unknown tool: {name}")
+        try:
+            if entry.is_async:
+                result = await entry.handler(args, **kwargs)
+            else:
+                result = entry.handler(args, **kwargs)
+            if not isinstance(result, str):
+                result = json.dumps(result, ensure_ascii=False, default=str)
+            if entry.max_result_chars is not None and len(result) > entry.max_result_chars:
+                result = json.dumps({"truncated": True, "content": result[:entry.max_result_chars]}, ensure_ascii=False)
+            return result
+        except Exception as exc:
+            log.error("[Tools] %s async_dispatch error: %s", name, exc, exc_info=True)
+            return tool_error(f"{type(exc).__name__}: {exc}")
+
 
 def _run_async(coro_factory: Callable[[], Any]) -> Any:
     """Run a coroutine factory from sync context.

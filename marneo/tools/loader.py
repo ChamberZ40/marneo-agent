@@ -14,6 +14,7 @@ def load_all_tools() -> None:
     from marneo.tools.core import web          # noqa: F401
     from marneo.tools.core import lark_cli     # noqa: F401
     from marneo.tools.core import feishu_tools  # noqa: F401
+    from marneo.tools.core import ask_user     # noqa: F401
 
     # --- Manifest-first plugin discovery ---
     _load_plugins()

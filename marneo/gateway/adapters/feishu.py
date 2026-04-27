@@ -973,17 +973,32 @@ class FeishuChannelAdapter(BaseChannelAdapter):
     # -------------------------------------------------------------------------
 
     def _on_card_action(self, data: Any) -> Any:
-        """Route card button clicks as synthetic text messages."""
+        """Route card button clicks — resolve ask_user questions or dispatch as synthetic text."""
         try:
             from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
             action = getattr(data, "action", None) or {}
             value = getattr(action, "value", {}) or {}
-            cmd = value.get("command", str(value))
             operator = getattr(data, "operator", None)
             user_id = getattr(operator, "open_id", "") if operator else ""
             chat_id = getattr(data, "open_chat_id", "") or ""
             msg_id = getattr(data, "open_message_id", "") or ""
 
+            # ── ask_user question resolution ────────────────────────────────
+            marneo_question_id = value.get("marneo_question_id", "") if isinstance(value, dict) else ""
+            if marneo_question_id:
+                answer = value.get("answer", "")
+                from marneo.gateway.pending_questions import pending_question_store
+                resolved = pending_question_store.resolve(marneo_question_id, answer)
+                if resolved:
+                    log.info("[Feishu] Card action resolved question %s: %s",
+                             marneo_question_id, answer[:60])
+                    resp = P2CardActionTriggerResponse()
+                    resp.toast = {"type": "info", "content": "已收到回复"}
+                    return resp
+                # Question not found (expired/already resolved) — fall through
+
+            # ── Existing behavior: dispatch as synthetic text ────────────────
+            cmd = value.get("command", str(value)) if isinstance(value, dict) else str(value)
             if cmd and self._loop and self._loop_accepts_callbacks(self._loop):
                 channel_msg = ChannelMessage(
                     platform=self.platform,
@@ -1015,54 +1030,75 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
         Falls back to text send_reply if Card Kit card creation fails.
         """
-        log.info("[msg:%s] Streaming started", msg.msg_id[:12] if msg.msg_id else "?")
-        card = FeishuStreamingCard(
-            app_id=self._app_id,
-            app_secret=self._app_secret,
-            domain=self._domain,
-        )
-        # Always reply to the original message — shows "回复 张子豪: ..." header
-        card_started = await card.start(
-            chat_id=msg.chat_id,
-            reply_to_msg_id=msg.msg_id,
-            sender_name=msg.user_name or "",
-        )
+        # Set ask_user context so the tool can send cards to this chat
+        from marneo.tools.core.ask_user import ask_user_ctx, AskUserContext
+        ctx_token = ask_user_ctx.set(AskUserContext(chat_id=msg.chat_id, adapter=self))
 
-        if not card_started:
-            log.warning("[Streaming] Card creation failed, falling back to text reply")
-            parts: list[str] = []
-            async for event in engine.send_with_tools(
-                msg.text, registry=registry, attachments=msg.attachments or None
-            ):
-                if event.type == "text" and event.content:
-                    parts.append(event.content)
-            reply = "".join(parts).strip()
-            if reply:
-                await self.send_reply(msg.chat_id, reply)
-            return
-
-        # Stream LLM output to card
-        accumulated = ""
+        # Check for pending text-reply questions before normal processing
+        from marneo.gateway.pending_questions import pending_question_store
+        if pending_question_store.has_pending_for_chat(msg.chat_id):
+            # Strip the context prefix to get raw user text
+            raw_text = msg.text
+            # The context prefix ends with a newline before the user text
+            if "\n" in raw_text:
+                raw_text = raw_text.split("\n", 1)[-1].strip()
+            resolved = pending_question_store.resolve_by_chat_text(msg.chat_id, raw_text)
+            if resolved:
+                log.info("[msg:%s] Resolved pending text-reply question", msg.msg_id[:12] if msg.msg_id else "?")
+                ask_user_ctx.reset(ctx_token)
+                return
 
         try:
-            async for event in engine.send_with_tools(
-                msg.text, registry=registry, attachments=msg.attachments or None
-            ):
-                if event.type == "text" and event.content:
-                    accumulated += event.content
-                    await card.update(accumulated)
-                elif event.type == "tool_call":
-                    # Tool is being called — the text so far is narration, not final answer.
-                    # Reset accumulated so only post-tool text appears in the card.
-                    accumulated = ""
-                    await card.update("⏳ 工具执行中...")
-                elif event.type == "tool_result":
-                    log.debug("[Streaming] Tool result: %s", event.content[:100])
-        except Exception as exc:
-            log.error("[Streaming] LLM error during streaming: %s", exc)
-            accumulated = accumulated or f"处理出错：{exc}"
+            log.info("[msg:%s] Streaming started", msg.msg_id[:12] if msg.msg_id else "?")
+            card = FeishuStreamingCard(
+                app_id=self._app_id,
+                app_secret=self._app_secret,
+                domain=self._domain,
+            )
+            # Always reply to the original message — shows "回复 张子豪: ..." header
+            card_started = await card.start(
+                chat_id=msg.chat_id,
+                reply_to_msg_id=msg.msg_id,
+                sender_name=msg.user_name or "",
+            )
+
+            if not card_started:
+                log.warning("[Streaming] Card creation failed, falling back to text reply")
+                parts: list[str] = []
+                async for event in engine.send_with_tools(
+                    msg.text, registry=registry, attachments=msg.attachments or None
+                ):
+                    if event.type == "text" and event.content:
+                        parts.append(event.content)
+                reply = "".join(parts).strip()
+                if reply:
+                    await self.send_reply(msg.chat_id, reply)
+                return
+
+            # Stream LLM output to card
+            accumulated = ""
+
+            try:
+                async for event in engine.send_with_tools(
+                    msg.text, registry=registry, attachments=msg.attachments or None
+                ):
+                    if event.type == "text" and event.content:
+                        accumulated += event.content
+                        await card.update(accumulated)
+                    elif event.type == "tool_call":
+                        # Tool is being called — the text so far is narration, not final answer.
+                        # Reset accumulated so only post-tool text appears in the card.
+                        accumulated = ""
+                        await card.update("⏳ 工具执行中...")
+                    elif event.type == "tool_result":
+                        log.debug("[Streaming] Tool result: %s", event.content[:100])
+            except Exception as exc:
+                log.error("[Streaming] LLM error during streaming: %s", exc)
+                accumulated = accumulated or f"处理出错：{exc}"
+            finally:
+                await card.close(accumulated)
         finally:
-            await card.close(accumulated)
+            ask_user_ctx.reset(ctx_token)
 
     # -------------------------------------------------------------------------
     # Send reply — with reply fallback (openclaw WITHDRAWN_REPLY_ERROR_CODES)
