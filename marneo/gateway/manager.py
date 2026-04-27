@@ -68,7 +68,8 @@ class GatewayManager:
                 return
             except Exception as e:
                 log.error("[Gateway] Streaming process error: %s", e)
-                # Fall through to text mode
+                # Don't fall through to text mode — card may already be visible
+                return
 
         # Text fallback: collect all text events then send
         parts: list[str] = []
