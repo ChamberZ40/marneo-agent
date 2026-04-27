@@ -175,10 +175,25 @@ class GatewayManager:
         except Exception as e:
             log.warning("[Gateway] Health check server failed to start: %s", e)
 
+    async def _session_cleanup_loop(self) -> None:
+        """Periodically evict expired sessions to prevent memory leak."""
+        while self._running:
+            await asyncio.sleep(300)
+            try:
+                before = self._sessions.active_count
+                self._sessions._evict()
+                after = self._sessions.active_count
+                evicted = before - after
+                if evicted > 0:
+                    log.info("[Gateway] Evicted %d expired sessions (%d active)", evicted, after)
+            except Exception as exc:
+                log.warning("[Gateway] Session cleanup error: %s", exc)
+
     async def run_forever(self) -> None:
         self._running = True
         await self.start_all()
         await self._start_health_server()
+        asyncio.create_task(self._session_cleanup_loop())
         log.info("[Gateway] Running.")
         try:
             while self._running:
