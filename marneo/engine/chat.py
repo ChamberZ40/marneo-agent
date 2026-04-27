@@ -301,18 +301,20 @@ class ChatSession:
             if collected_text:
                 self.messages.append({"role": "assistant", "content": collected_text})
             if tool_calls_raw:
-                self.messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {"name": tc["name"], "arguments": _json.dumps(tc.get("args", {}))},
-                        }
-                        for tc in tool_calls_raw
-                    ],
-                })
+                valid_tcs = [tc for tc in tool_calls_raw if tc is not None]
+                if valid_tcs:
+                    self.messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tc.get("id", ""),
+                                "type": "function",
+                                "function": {"name": tc.get("name", ""), "arguments": _json.dumps(tc.get("args", {}))},
+                            }
+                            for tc in valid_tcs
+                        ],
+                    })
 
         except Exception as exc:
             log.error("Chat with tools error: %s", exc)
@@ -340,15 +342,15 @@ class ChatSession:
             tool_choice="auto",
             max_tokens=4096,
             stream=True,
-            stream_options={"include_usage": True},
         )
 
         tc_accum: dict[int, dict] = {}
 
         async for chunk in stream:
-            if not chunk.choices:
-                # Final chunk with usage stats (stream_options.include_usage)
+            # Capture usage from final chunk (if provider supports it)
+            if hasattr(chunk, "usage") and chunk.usage:
                 self.token_tracker.record_from_openai(provider.model, chunk)
+            if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
             if delta is None:

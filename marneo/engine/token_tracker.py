@@ -46,12 +46,17 @@ class TokenTracker:
         usage = getattr(response, "usage", None)
         if not usage:
             return
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = 0
+        if details and hasattr(details, "get"):
+            cached = details.get("cached_tokens", 0) or 0
+        elif details and hasattr(details, "cached_tokens"):
+            cached = getattr(details, "cached_tokens", 0) or 0
         self.record(
             model=model,
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            cache_read=getattr(usage, "prompt_tokens_details", {}).get("cached_tokens", 0)
-                       if hasattr(getattr(usage, "prompt_tokens_details", None) or {}, "get") else 0,
+            cache_read=cached,
         )
 
     def record_from_anthropic(self, model: str, response: Any) -> None:

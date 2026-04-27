@@ -107,21 +107,31 @@ _REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # withdrawn/missing
 # Technique from hermes-agent: patch ws_client_module.loop before start()
 # ---------------------------------------------------------------------------
 
-def _run_feishu_ws_client(ws_client: Any) -> None:
-    """Run lark-oapi WS client in executor thread with its own event loop.
+def _run_feishu_ws_client(app_id: str, app_secret: str, domain: Any,
+                          handler: Any, on_ready: Any) -> None:
+    """Run lark-oapi WS client in executor thread with a clean event loop.
 
-    Key: patch ``lark_oapi.ws.client.loop`` to the thread-local loop so
-    the client does not see the already-running main loop (hermes technique).
+    Key fix: create the Client INSIDE the thread so asyncio.Lock() in __init__
+    binds to the thread-local loop, not the main loop. This prevents
+    "Future attached to a different loop" errors that cause ping_timeout.
     """
-    try:
-        import lark_oapi.ws.client as ws_client_module
-    except Exception:
-        log.error("[Feishu] Cannot import lark_oapi.ws.client")
-        return
+    import lark_oapi.ws.client as ws_client_module
+    from lark_oapi.ws import Client as FeishuWSClient
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    ws_client_module.loop = loop  # hermes-agent key patch
+    ws_client_module.loop = loop  # module-level loop used by start()/_connect()
+
+    # Create client HERE so asyncio.Lock() binds to this thread's loop
+    ws_client = FeishuWSClient(
+        app_id=app_id,
+        app_secret=app_secret,
+        event_handler=handler,
+        domain=domain,
+        auto_reconnect=True,
+    )
+    # Pass the client back to the adapter for disconnect
+    on_ready(ws_client)
 
     try:
         ws_client.start()
@@ -361,7 +371,6 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
     async def _start_websocket(self) -> None:
         import lark_oapi as lark
-        from lark_oapi.ws import Client as FeishuWSClient
 
         lark_domain = lark.LARK_DOMAIN if self._domain == "lark" else lark.FEISHU_DOMAIN
 
@@ -381,17 +390,20 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             .register_p2_application_application_app_version_publish_revoke_v6(_noop)
             .build()
         )
-        self._ws_client = FeishuWSClient(
-            app_id=self._app_id,
-            app_secret=self._app_secret,
-            event_handler=handler,
-            domain=lark_domain,
-        )
+
+        # Callback to receive the WS client created inside the thread
+        def _on_ws_ready(client: Any) -> None:
+            self._ws_client = client
+
         main_loop = asyncio.get_running_loop()
         self._ws_future = main_loop.run_in_executor(
             None,
             _run_feishu_ws_client,
-            self._ws_client,
+            self._app_id,
+            self._app_secret,
+            lark_domain,
+            handler,
+            _on_ws_ready,
         )
 
     # -------------------------------------------------------------------------
@@ -1009,11 +1021,10 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             app_secret=self._app_secret,
             domain=self._domain,
         )
-        # DM: reply as thread (visible inline). Group: new message (less cluttered)
-        reply_mode = msg.msg_id if msg.chat_type == "dm" else None
+        # Always reply to the original message — shows "回复 张子豪: ..." header
         card_started = await card.start(
             chat_id=msg.chat_id,
-            reply_to_msg_id=reply_mode,
+            reply_to_msg_id=msg.msg_id,
             sender_name=msg.user_name or "",
         )
 

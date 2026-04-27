@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.4] - 2026-04-27
+
+### Fixed
+- **WS ping_timeout (3003)**: create lark-oapi Client inside executor thread so asyncio.Lock() binds to the correct event loop — eliminates "different loop" errors that killed ping/pong
+- **NoneType crash in token tracking**: `prompt_tokens_details` can be None from MiniMax relay; added robust null checks
+- **stream_options incompatibility**: removed `stream_options={"include_usage": True}` that broke MiniMax; capture usage opportunistically instead
+- **Duplicate reply via feishu_send_mention**: platform hint now tells LLM not to use mention tool for replying to sender (card IS the reply)
+
+### Changed
+- **Group chat replies**: streaming card now replies to original message (shows "回复 张子豪: ..." header) — consistent with DM behavior
+- Upgraded lark-oapi from 1.4.24 to 1.5.5
+
 ## [0.1.3] - 2026-04-27
 
 ### Added

@@ -11,9 +11,10 @@ _HINTS: dict[str, str] = {
         "Platform: Feishu (飞书). "
         "Formatting: Markdown is rendered (headers, bold, code blocks, lists). "
         "Messages support 4000 chars max. "
-        "You can @mention users with feishu_send_mention tool. "
-        "You can create docs with feishu_create_doc tool. "
-        "Streaming card mode is active — your response appears as a live-updating card."
+        "Streaming card mode is active — your text response IS the reply, shown as a live-updating card. "
+        "IMPORTANT: Do NOT use feishu_send_mention to reply to the sender — your card response is already visible to them. "
+        "Only use feishu_send_mention when explicitly asked to @mention a DIFFERENT person or bot. "
+        "You can create docs with feishu_create_doc tool."
     ),
     "telegram": (
         "Platform: Telegram. "
