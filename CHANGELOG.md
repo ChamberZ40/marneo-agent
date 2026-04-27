@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.5] - 2026-04-27
+
+### Added
+- **AutoDream memory consolidation** (openclaw Dreaming pattern):
+  - `RecallTracker`: records every memory retrieval hit with scores, query hashes, concept tags, recall days
+  - `DreamingSweep`: three-phase sweep — Light Sleep (ingest episodes as synthetic recalls), REM Sleep (pattern analysis), Deep Sleep (6-signal scoring + promotion)
+  - Scoring formula: frequency 24% / relevance 30% / diversity 15% / recency 15% (14-day half-life) / consolidation 10% / conceptual 6%
+  - Threshold gates: score >= 0.75, recall_count >= 3, unique_queries >= 2
+  - Wired into HybridRetriever — recalls tracked automatically during retrieval
+- **Manifest-First plugin system** (openclaw pattern):
+  - `PluginManifest`: frozen dataclass parsed from `manifest.json` (no code execution at discovery)
+  - `PluginRegistry`: discover → activate (lazy import) → deactivate lifecycle
+  - `load_plugin_module`: handles dotted module paths and file paths
+  - Auto-activates `enabled_by_default` plugins during startup
+  - Thread-safe, bad plugins can't crash the system
+- 33 new tests (245 total)
+
 ## [0.1.4] - 2026-04-27
 
 ### Fixed

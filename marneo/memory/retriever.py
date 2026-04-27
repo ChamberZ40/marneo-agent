@@ -14,6 +14,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from marneo.memory.episodes import Episode, EpisodeStore
+from marneo.memory.recall_tracker import RecallTracker
 
 log = logging.getLogger(__name__)
 
@@ -30,9 +31,15 @@ def _tokenize(text: str) -> list[str]:
 class HybridRetriever:
     """BM25 + fastembed vector hybrid retrieval."""
 
-    def __init__(self, store: EpisodeStore, vectors_path: Path) -> None:
+    def __init__(
+        self,
+        store: EpisodeStore,
+        vectors_path: Path,
+        recall_tracker: Optional[RecallTracker] = None,
+    ) -> None:
         self._store = store
         self._vectors_path = vectors_path
+        self._recall_tracker = recall_tracker
         self._episodes: list[Episode] = []
         self._bm25: Optional[BM25Okapi] = None
         self._vectors: Optional[np.ndarray] = None
@@ -106,6 +113,9 @@ class HybridRetriever:
             candidates = self._episodes
             candidate_scores = {}
 
+        # Track final scores for recall recording
+        result_scores: dict[str, float] = {}
+
         if self._bm25 and candidates:
             q_tokens = _tokenize(query)
             all_bm25 = self._bm25.get_scores(q_tokens)
@@ -119,6 +129,7 @@ class HybridRetriever:
                 vec_score = candidate_scores.get(ep.id, 0.0)
                 final_score = 0.6 * vec_score + 0.4 * bm25_score
                 combined.append((final_score, ep))
+                result_scores[ep.id] = final_score
             combined.sort(key=lambda x: x[0], reverse=True)
             results = [ep for score, ep in combined if score >= threshold][:n]
         else:
@@ -126,6 +137,20 @@ class HybridRetriever:
 
         for ep in results:
             self._store.increment_access(ep.id)
+
+        # Record retrieval hits in recall tracker for dreaming
+        if self._recall_tracker is not None and query.strip():
+            for ep in results:
+                score = result_scores.get(ep.id, 0.0)
+                try:
+                    self._recall_tracker.record(
+                        episode_id=ep.id,
+                        content=ep.content,
+                        score=score,
+                        query=query,
+                    )
+                except Exception as exc:
+                    log.debug("[Memory] Recall tracking failed for %s: %s", ep.id, exc)
 
         return results
 
@@ -148,4 +173,5 @@ class HybridRetriever:
         from marneo.core.paths import get_marneo_dir
         base = get_marneo_dir() / "employees" / employee_name / "memory" / "episodes"
         store = EpisodeStore(base / "index.db")
-        return cls(store, base / "vectors.npy")
+        tracker = RecallTracker.for_employee(employee_name)
+        return cls(store, base / "vectors.npy", recall_tracker=tracker)
