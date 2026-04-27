@@ -953,9 +953,11 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             app_secret=self._app_secret,
             domain=self._domain,
         )
+        # DM: reply as thread (visible inline). Group: new message (less cluttered)
+        reply_mode = msg.msg_id if msg.chat_type == "dm" else None
         card_started = await card.start(
             chat_id=msg.chat_id,
-            reply_to_msg_id=None,   # don't reply-thread, send as new message so it's visible
+            reply_to_msg_id=reply_mode,
             sender_name=msg.user_name or "",
         )
 
