@@ -155,6 +155,14 @@ class GatewayManager:
             async def health(request: web.Request) -> web.Response:
                 import json
                 connected = [p for p, a in self._adapters.items() if a.is_running]
+
+                # Get last event time from adapters (feishu watchdog)
+                last_event = 0
+                for adapter in self._adapters.values():
+                    t = getattr(adapter, "_last_event_time", 0)
+                    if t > last_event:
+                        last_event = t
+
                 return web.Response(
                     content_type="application/json",
                     text=json.dumps({
@@ -162,6 +170,8 @@ class GatewayManager:
                         "uptime_seconds": int(time.time() - _start_time),
                         "sessions": self._sessions.active_count,
                         "connected_channels": connected,
+                        "tools": len(_tool_registry.get_definitions()),
+                        "last_event_seconds_ago": int(time.monotonic() - last_event) if last_event > 0 else None,
                     }),
                 )
 
