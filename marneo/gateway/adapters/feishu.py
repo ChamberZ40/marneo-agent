@@ -377,6 +377,8 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             .register_p2_im_message_reaction_deleted_v1(_noop)
             .register_p2_im_chat_member_bot_added_v1(_noop)
             .register_p2_im_chat_member_bot_deleted_v1(_noop)
+            .register_p2_application_application_app_version_publish_apply_v6(_noop)
+            .register_p2_application_application_app_version_publish_revoke_v6(_noop)
             .build()
         )
         self._ws_client = FeishuWSClient(
@@ -546,33 +548,34 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         msg_id = getattr(msg_body, "message_id", "") or ""
         sender_id = getattr(getattr(sender, "sender_id", None), "open_id", "") or ""
 
-        log.info("[msg:%s] Processing message from %s in %s (chat_type=%s)",
-                 msg_id[:12] if msg_id else "?", sender_id[:12] if sender_id else "?",
-                 chat_id[:12] if chat_id else "?", chat_type)
+        # ── Fast sync checks BEFORE any async operation ──────────────────────
+        # Dedup MUST be first: Feishu WS re-delivers events if previous
+        # processing was still in an await (e.g. _resolve_sender_name).
+        if self._dedup and msg_id and self._dedup.seen(msg_id):
+            log.debug("[Feishu] Duplicate msg ignored: %s", msg_id)
+            return
 
-        # Resolve sender display name (cached, no repeated API calls)
-        sender_name = await self._resolve_sender_name(sender_id)
-
-        # Drop self-sent messages to prevent infinite loop.
-        # Only drop messages from THIS bot — other bots' messages are allowed through
-        # so multi-agent @mention collaboration works (hermes pattern).
+        # Drop self-sent messages (sync check, no API call needed)
         if self._is_self_sent_bot_message(sender):
             log.debug("[Feishu] Dropping self-sent bot event: %s", msg_id)
             return
-
-        try:
-            content = json.loads(content_str)
-        except Exception:
-            content = {}
 
         # Allowlist check
         if self._allowed_users and sender_id not in self._allowed_users:
             return
 
-        # Dedup (disk-persistent)
-        if self._dedup and msg_id and self._dedup.seen(msg_id):
-            log.debug("[Feishu] Duplicate msg ignored: %s", msg_id)
-            return
+        log.info("[msg:%s] Processing message from %s in %s (chat_type=%s)",
+                 msg_id[:12] if msg_id else "?", sender_id[:12] if sender_id else "?",
+                 chat_id[:12] if chat_id else "?", chat_type)
+
+        # ── Async operations after dedup gate ────────────────────────────────
+        # Resolve sender display name (cached, no repeated API calls)
+        sender_name = await self._resolve_sender_name(sender_id)
+
+        try:
+            content = json.loads(content_str)
+        except Exception:
+            content = {}
 
         # Parse text
         text = self._extract_text(msg_type, content, msg_body)
@@ -1029,10 +1032,6 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
         # Stream LLM output to card
         accumulated = ""
-        # In group chats, prefix reply with @sender so they're notified
-        at_prefix = ""
-        if msg.chat_type == "group" and msg.user_id:
-            at_prefix = f'<at id={msg.user_id}></at> '
 
         try:
             async for event in engine.send_with_tools(
@@ -1040,14 +1039,19 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             ):
                 if event.type == "text" and event.content:
                     accumulated += event.content
-                    await card.update(at_prefix + accumulated)
+                    await card.update(accumulated)
+                elif event.type == "tool_call":
+                    # Tool is being called — the text so far is narration, not final answer.
+                    # Reset accumulated so only post-tool text appears in the card.
+                    accumulated = ""
+                    await card.update("⏳ 工具执行中...")
                 elif event.type == "tool_result":
                     log.debug("[Streaming] Tool result: %s", event.content[:100])
         except Exception as exc:
             log.error("[Streaming] LLM error during streaming: %s", exc)
             accumulated = accumulated or f"处理出错：{exc}"
         finally:
-            await card.close(at_prefix + accumulated)
+            await card.close(accumulated)
 
     # -------------------------------------------------------------------------
     # Send reply — with reply fallback (openclaw WITHDRAWN_REPLY_ERROR_CODES)
@@ -1169,12 +1173,19 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
     async def disconnect(self) -> None:
         self._running = False
+        # Cancel the executor future — the WS Client has no stop() method,
+        # so we close the underlying websocket connection directly.
         if self._ws_client:
-            try:
-                self._ws_client.stop()
-            except Exception as exc:
-                log.warning("[Feishu] WS client stop error: %s", exc)
+            conn = getattr(self._ws_client, "_conn", None)
+            if conn:
+                try:
+                    await asyncio.wait_for(conn.close(), timeout=3)
+                except Exception:
+                    pass
             self._ws_client = None
+        if self._ws_future:
+            self._ws_future.cancel()
+            self._ws_future = None
         log.info("[Feishu] Disconnected (employee=%s)", self._employee_name or "—")
 
     # -------------------------------------------------------------------------
