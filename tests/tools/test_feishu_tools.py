@@ -97,11 +97,26 @@ def test_create_doc_missing_content():
 
 
 def test_create_doc_delegates_to_lark_cli():
-    """Verify it calls lark_cli with the right command."""
+    """Verify it calls lark_cli with shlex-quoted args."""
     from unittest.mock import patch
+    import shlex
     with patch("marneo.tools.core.lark_cli.lark_cli", return_value='{"ok": true}') as mock:
         result = feishu_create_doc({"title": "Test Doc", "content": "# Hello"})
         mock.assert_called_once()
         call_args = mock.call_args[0][0]
         assert "docs +create" in call_args["command"]
-        assert "Test Doc" in call_args["command"]
+        assert shlex.quote("Test Doc") in call_args["command"]
+        assert shlex.quote("# Hello") in call_args["command"]
+
+
+def test_create_doc_escapes_special_chars():
+    """Verify shlex.quote prevents injection of shell metacharacters."""
+    from unittest.mock import patch
+    import shlex
+    malicious_title = 'foo"; rm -rf /'
+    with patch("marneo.tools.core.lark_cli.lark_cli", return_value='{"ok": true}') as mock:
+        feishu_create_doc({"title": malicious_title})
+        call_args = mock.call_args[0][0]
+        assert shlex.quote(malicious_title) in call_args["command"]
+        # The raw malicious string should NOT appear unquoted
+        assert '"; rm -rf /' not in call_args["command"].replace(shlex.quote(malicious_title), "")

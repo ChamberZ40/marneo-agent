@@ -203,18 +203,19 @@ registry.register(
 
 
 def feishu_create_doc(args: dict[str, Any], **kw: Any) -> str:
-    """Create a Feishu document — delegates to lark_cli docs +create."""
+    """Create a Feishu document — delegates to lark_cli."""
     title = args.get("title", "").strip()
     content = args.get("content", "").strip()
     if not title and not content:
         return tool_error("title or content is required")
+    import shlex
     from marneo.tools.core.lark_cli import lark_cli
-    cmd = "docs +create"
+    parts = ["docs", "+create"]
     if title:
-        cmd += f' --title "{title}"'
+        parts.extend(["--title", shlex.quote(title)])
     if content:
-        cmd += f' --content "{content}"'
-    return lark_cli({"command": cmd})
+        parts.extend(["--content", shlex.quote(content)])
+    return lark_cli({"command": " ".join(parts)})
 
 
 registry.register(
