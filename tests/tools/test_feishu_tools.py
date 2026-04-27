@@ -81,6 +81,14 @@ def test_search_user_no_lark_cli():
     assert "error" in result
 
 
+def test_search_user_no_lark_cli_with_chat_id():
+    """When lark-cli not found with chat_id, returns error."""
+    from unittest.mock import patch
+    with patch("shutil.which", return_value=None):
+        result = json.loads(feishu_search_user({"query": "test", "chat_id": "oc_123"}))
+    assert "error" in result
+
+
 # ── feishu_create_doc validation ─────────────────────────────────────────────
 
 def test_create_doc_missing_content():

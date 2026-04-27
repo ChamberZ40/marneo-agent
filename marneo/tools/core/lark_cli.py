@@ -130,7 +130,7 @@ registry.register(
         "description": (
             "Execute any lark-cli command to interact with Feishu/Lark. "
             "Key commands: "
-            "'chat members --chat-id oc_xxx' (list group members with open_id to find who to @mention), "
+            "'im chat.members get --params {\"chat_id\":\"oc_xxx\"}' (list group members with open_id to find who to @mention), "
             "'calendar +agenda', "
             "'docs +create --content \"...\"', "
             "'im +messages-send --chat-id oc_xxx --text hello'. "

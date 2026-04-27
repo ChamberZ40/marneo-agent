@@ -108,8 +108,9 @@ def feishu_send_mention(args: dict[str, Any], **kw: Any) -> str:
 
 
 def feishu_search_user(args: dict[str, Any], **kw: Any) -> str:
-    """Search Feishu users via lark-cli (uses existing App permissions)."""
+    """Search Feishu users — try group member list first, then contact search."""
     query = args.get("query", "").strip()
+    chat_id = args.get("chat_id", "").strip()
     if not query:
         return tool_error("query is required")
 
@@ -119,20 +120,26 @@ def feishu_search_user(args: dict[str, Any], **kw: Any) -> str:
         if not lark_bin:
             return tool_error("lark-cli not installed")
 
+        # If chat_id provided, search group members first (more reliable)
+        if chat_id:
+            result = subprocess.run(
+                [lark_bin, "im", "chat.members", "get",
+                 "--params", json.dumps({"chat_id": chat_id}),
+                 "--as", "bot", "--format", "json"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return tool_result(raw=result.stdout.strip(), query=query, source="chat_members")
+
+        # Fallback: try contact search
         result = subprocess.run(
-            [lark_bin, "contact", "+search", "--keyword", query,
+            [lark_bin, "api", "GET", "/open-apis/search/v1/user",
+             "--params", json.dumps({"query": query, "page_size": "5"}),
              "--as", "bot", "--format", "json"],
             capture_output=True, text=True, timeout=15,
         )
-        if result.returncode != 0:
-            # fallback: try without +search shortcut
-            result = subprocess.run(
-                [lark_bin, "contact", "users", "batch_get_id",
-                 "--emails", query, "--as", "bot", "--format", "json"],
-                capture_output=True, text=True, timeout=15,
-            )
         output = result.stdout.strip() or result.stderr.strip()
-        return tool_result(raw=output, query=query)
+        return tool_result(raw=output, query=query, source="contact_search")
     except Exception as exc:
         return tool_error(str(exc))
 
@@ -177,14 +184,15 @@ registry.register(
 
 registry.register(
     name="feishu_search_user",
-    description="Search Feishu users by name/email to get their open_id for @mention.",
+    description="Search Feishu users or list group members to find open_id.",
     schema={
         "name": "feishu_search_user",
-        "description": "Search for Feishu users by name, email, or phone. Returns open_id for use in feishu_send_mention.",
+        "description": "Search for users or list group members. Provide chat_id to list members of a specific group.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Name, email, or phone to search"},
+                "query": {"type": "string", "description": "Name to search for"},
+                "chat_id": {"type": "string", "description": "Optional: group chat_id to list members from (more reliable)"},
             },
             "required": ["query"],
         },
