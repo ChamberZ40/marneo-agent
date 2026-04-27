@@ -210,3 +210,48 @@ class TestCoreMemoryIntegration:
         contents = [e["content"] for e in entries]
         assert "API key 不能硬编码" in contents
         assert "所有数据库查询必须参数化" in contents
+
+
+# ---------------------------------------------------------------------------
+# D5: Context budget enforcement
+# ---------------------------------------------------------------------------
+
+class TestContextBudgetEnforcement:
+    """Verify context budget limits are enforced."""
+
+    def test_context_budget_enforces_prompt_limit(self, tmp_path):
+        """Set small budget (500 chars), build prompt with long SOUL, verify output within budget."""
+        long_soul = "这是一段非常长的灵魂描述，" * 100  # ~1200+ chars
+        core_path = tmp_path / "core.md"
+        core = CoreMemory(core_path)
+
+        sm = SessionMemory.__new__(SessionMemory)
+        sm._employee_name = "laoqi"
+        sm._soul = long_soul
+        sm._budget = ContextBudget(system_prompt_max=500, core_memory_max=100)
+        sm._core = core
+        sm._retriever = None
+        sm._store = None
+
+        prompt = sm.build_system_prompt("", skip_retrieval=True)
+
+        # The prompt must not exceed system_prompt_max
+        assert len(prompt) <= 500
+
+    def test_working_memory_trim(self):
+        """Verify trim_working_memory respects budget turns (cross-check with existing test)."""
+        sm = SessionMemory.__new__(SessionMemory)
+        sm._budget = ContextBudget(working_memory_turns=2)
+
+        messages = []
+        for i in range(10):
+            messages.append({"role": "user", "content": f"user msg {i}"})
+            messages.append({"role": "assistant", "content": f"assistant reply {i}"})
+
+        trimmed = sm.trim_working_memory(messages)
+
+        # 2 turns = 4 messages (2 user + 2 assistant)
+        assert len(trimmed) == 4
+        # Should contain the last 2 turns
+        assert trimmed[-1]["content"] == "assistant reply 9"
+        assert trimmed[0]["content"] == "user msg 8"
