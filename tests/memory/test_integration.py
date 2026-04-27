@@ -167,3 +167,46 @@ class TestSkillIndexingAndRetrieval:
         results = retriever.retrieve_bm25("飞书", n=3)
         assert len(results) > 0
         assert any(r.skill_id == "feishu-bitable" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# D4: Core memory in system prompt and persistence
+# ---------------------------------------------------------------------------
+
+class TestCoreMemoryIntegration:
+    """Verify core memory entries appear in system prompt and persist."""
+
+    def test_core_memory_in_system_prompt(self, tmp_path):
+        """Create CoreMemory, add entry, build SessionMemory prompt, verify entry is in prompt."""
+        core_path = tmp_path / "core.md"
+        core = CoreMemory(core_path)
+        core.add("绝对不能删除生产数据库", source="manual")
+
+        sm = SessionMemory.__new__(SessionMemory)
+        sm._employee_name = "laoqi"
+        sm._soul = "我是老七。"
+        sm._budget = ContextBudget(system_prompt_max=4000, core_memory_max=1000)
+        sm._core = core
+        sm._retriever = None
+        sm._store = None
+
+        prompt = sm.build_system_prompt("", skip_retrieval=True)
+
+        assert "绝对不能删除生产数据库" in prompt
+        assert "核心记忆" in prompt
+
+    def test_core_memory_persistence(self, tmp_path):
+        """Add entry, create new CoreMemory instance, verify entry persists."""
+        core_path = tmp_path / "core.md"
+        cm1 = CoreMemory(core_path)
+        cm1.add("API key 不能硬编码", source="manual")
+        cm1.add("所有数据库查询必须参数化", source="llm")
+
+        # Create a completely new instance pointing to same file
+        cm2 = CoreMemory(core_path)
+        entries = cm2.list_entries()
+
+        assert len(entries) == 2
+        contents = [e["content"] for e in entries]
+        assert "API key 不能硬编码" in contents
+        assert "所有数据库查询必须参数化" in contents
