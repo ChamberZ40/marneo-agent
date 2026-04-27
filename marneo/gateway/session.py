@@ -1,6 +1,6 @@
 # marneo/gateway/session.py
 from __future__ import annotations
-import asyncio, logging, time
+import asyncio, datetime as _dt, logging, time
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -77,6 +77,20 @@ class SessionStore:
 
                 sm = SessionMemory(emp_name, soul=soul)
                 system_prompt = sm.build_system_prompt()
+
+                # Session startup context
+                startup_ctx = (
+                    f"Session started at {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. "
+                    f"Employee: {display_name} (id: {emp_name}). "
+                    f"Platform: Feishu. "
+                    f"You have tools available: bash, read_file, write_file, edit_file, "
+                    f"glob, grep, web_fetch, web_search, lark_cli, "
+                    f"feishu_send_mention, feishu_search_user, feishu_create_doc. "
+                    f"Use them when asked to do something."
+                )
+                if len(system_prompt) + len(startup_ctx) + 2 < sm._budget.system_prompt_max:
+                    system_prompt = f"{system_prompt}\n\n{startup_ctx}"
+
                 engine = ChatSession(system_prompt=system_prompt)
                 engine._session_memory = sm  # attach for use in dispatch
                 return engine
