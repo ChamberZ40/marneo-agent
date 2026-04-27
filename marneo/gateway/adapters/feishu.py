@@ -537,6 +537,9 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         msg_id = getattr(msg_body, "message_id", "") or ""
         sender_id = getattr(getattr(sender, "sender_id", None), "open_id", "") or ""
 
+        log.info("[msg:%s] Processing message from %s in %s",
+                 msg_id[:12], sender_id[:12], chat_id[:12])
+
         # Resolve sender display name (cached, no repeated API calls)
         sender_name = await self._resolve_sender_name(sender_id)
 
@@ -981,6 +984,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
         Falls back to text send_reply if Card Kit card creation fails.
         """
+        log.info("[msg:%s] Streaming started", msg.msg_id[:12] if msg.msg_id else "?")
         card = FeishuStreamingCard(
             app_id=self._app_id,
             app_secret=self._app_secret,

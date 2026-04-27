@@ -55,6 +55,8 @@ class GatewayManager:
             await self._process(msg, engine, adapter)
 
     async def _process(self, msg: ChannelMessage, engine: Any, adapter: BaseChannelAdapter) -> None:
+        log.info("[msg:%s] Processing via %s", msg.msg_id[:12] if msg.msg_id else "?",
+                 "streaming" if hasattr(adapter, "process_streaming") else "text")
         # Use streaming card if adapter supports it (Feishu with Card Kit)
         if hasattr(adapter, "process_streaming") and getattr(adapter, "_running", False):
             try:
