@@ -239,6 +239,10 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         # Reaction tracking: msg_id → reaction_id (for deletion)
         self._processing_reactions: OrderedDict[str, str] = OrderedDict()
 
+        # Watchdog: track last event time for stale-connection detection
+        self._last_event_time: float = 0
+        self._watchdog_task: Optional[asyncio.Task] = None
+
     # -------------------------------------------------------------------------
     # Validation & connect
     # -------------------------------------------------------------------------
@@ -286,12 +290,40 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 await self._start_websocket()
 
             self._running = True
+            # Start watchdog for stale-connection detection
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
             log.info("[Feishu] Connected (domain=%s mode=%s employee=%s)",
                      self._domain, self._connection_mode, self._employee_name or "—")
             return True
         except Exception as exc:
             log.error("[Feishu] Connect failed: %s", exc, exc_info=True)
             return False
+
+    # -------------------------------------------------------------------------
+    # WS watchdog — restart if no events for threshold period
+    # -------------------------------------------------------------------------
+
+    def _should_restart_ws(self, threshold: float = 300) -> bool:
+        """Check if WS should be restarted due to inactivity (testable sync helper)."""
+        if self._last_event_time == 0:
+            return False  # never received, still starting up
+        return time.monotonic() - self._last_event_time > threshold
+
+    async def _watchdog_loop(self) -> None:
+        """Periodically check for stale WS connection and restart if needed."""
+        while self._running:
+            await asyncio.sleep(60)
+            if not self._running:
+                break
+            if self._should_restart_ws():
+                log.warning("[Feishu] Watchdog: no events for 5m, restarting WS")
+                try:
+                    await self.disconnect()
+                    await self._start_websocket()
+                    self._running = True
+                    self._last_event_time = time.monotonic()
+                except Exception as exc:
+                    log.error("[Feishu] Watchdog restart failed: %s", exc)
 
     # -------------------------------------------------------------------------
     # Bot identity hydration (hermes-agent _hydrate_bot_identity)
@@ -459,6 +491,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
     # -------------------------------------------------------------------------
 
     def _on_message_event(self, data: Any) -> None:
+        self._last_event_time = time.monotonic()
         loop = self._loop
         log.debug("[Feishu] _on_message_event: loop=%s accepts=%s",
                  "none" if loop is None else "ok",
