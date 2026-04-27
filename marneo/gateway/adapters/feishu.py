@@ -364,10 +364,19 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         from lark_oapi.ws import Client as FeishuWSClient
 
         lark_domain = lark.LARK_DOMAIN if self._domain == "lark" else lark.FEISHU_DOMAIN
+
+        # No-op handler to suppress lark-oapi "processor not found" ERROR logs
+        _noop = lambda data: None
+
         handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message_event)
             .register_p2_card_action_trigger(self._on_card_action)
+            .register_p2_im_message_message_read_v1(_noop)
+            .register_p2_im_message_reaction_created_v1(_noop)
+            .register_p2_im_message_reaction_deleted_v1(_noop)
+            .register_p2_im_chat_member_bot_added_v1(_noop)
+            .register_p2_im_chat_member_bot_deleted_v1(_noop)
             .build()
         )
         self._ws_client = FeishuWSClient(
@@ -537,8 +546,9 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         msg_id = getattr(msg_body, "message_id", "") or ""
         sender_id = getattr(getattr(sender, "sender_id", None), "open_id", "") or ""
 
-        log.info("[msg:%s] Processing message from %s in %s",
-                 msg_id[:12], sender_id[:12], chat_id[:12])
+        log.info("[msg:%s] Processing message from %s in %s (chat_type=%s)",
+                 msg_id[:12] if msg_id else "?", sender_id[:12] if sender_id else "?",
+                 chat_id[:12] if chat_id else "?", chat_type)
 
         # Resolve sender display name (cached, no repeated API calls)
         sender_name = await self._resolve_sender_name(sender_id)
@@ -576,6 +586,12 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 return
             if self._group_policy == "at_only":
                 mentions = getattr(msg_body, "mentions", []) or []
+                # Debug: log what mentions actually look like
+                for m in mentions:
+                    m_id = getattr(m, "id", None)
+                    log.info("[Feishu] Mention: name=%s open_id=%s key=%s | bot_open_id=%s",
+                             getattr(m, "name", "?"), getattr(m_id, "open_id", "?") if m_id else "no_id",
+                             getattr(m, "key", "?"), self._bot_open_id[:16] if self._bot_open_id else "none")
                 bot_mentioned = (
                     any(getattr(getattr(m, "id", None), "open_id", "") == self._bot_open_id
                         for m in mentions)
