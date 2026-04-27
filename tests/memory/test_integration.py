@@ -74,3 +74,52 @@ class TestSessionMemoryPromptBuilding:
 
         assert "work-focused digital employee" in prompt
         assert "action-oriented" in prompt
+
+
+# ---------------------------------------------------------------------------
+# D2: Episode extraction integration
+# ---------------------------------------------------------------------------
+
+class TestEpisodeExtraction:
+    """Verify episode extraction from conversation turns end-to-end."""
+
+    def test_episode_extraction_from_conversation(self, tmp_path):
+        """Call add_episode_from_turn with decision-bearing reply, verify episode saved."""
+        store = EpisodeStore(tmp_path / "episodes.db")
+        retriever = HybridRetriever(store, tmp_path / "vectors.npy")
+
+        sm = SessionMemory.__new__(SessionMemory)
+        sm._employee_name = "laoqi"
+        sm._soul = ""
+        sm._budget = ContextBudget()
+        sm._core = CoreMemory(tmp_path / "core.md")
+        sm._retriever = retriever
+        sm._store = store
+
+        user_msg = "用哪个库处理 PDF？"
+        assistant_reply = "我们决定用 pypdf 因为 API 更简单。pdfminer 太复杂了。"
+
+        sm.add_episode_from_turn(user_msg, assistant_reply)
+
+        episodes = store.get_all()
+        assert len(episodes) == 1
+        assert "pypdf" in episodes[0].content
+        assert episodes[0].type == "decision"
+
+    def test_episode_extraction_skips_short_reply(self, tmp_path):
+        """Call with short reply, verify nothing saved."""
+        store = EpisodeStore(tmp_path / "episodes.db")
+        retriever = HybridRetriever(store, tmp_path / "vectors.npy")
+
+        sm = SessionMemory.__new__(SessionMemory)
+        sm._employee_name = "laoqi"
+        sm._soul = ""
+        sm._budget = ContextBudget()
+        sm._core = CoreMemory(tmp_path / "core.md")
+        sm._retriever = retriever
+        sm._store = store
+
+        sm.add_episode_from_turn("你好", "好的！")
+
+        episodes = store.get_all()
+        assert len(episodes) == 0
