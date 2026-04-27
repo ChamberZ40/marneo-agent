@@ -9,10 +9,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from marneo.engine.provider import resolve_provider, ResolvedProvider
+from marneo.engine.json_repair import repair_json
 
 log = logging.getLogger(__name__)
 
 _MAX_TEXT_INJECT = 200_000  # 200 KB max for text file inline injection
+_LOOP_DETECT_THRESHOLD = 3  # consecutive identical tool calls before breaking
 
 
 def _build_content_blocks(
@@ -186,6 +188,8 @@ class ChatSession:
         call_text = user_text
         hit_limit = True
         _first_call = True
+        _prev_call_sig: str = ""   # "name:args_json" of previous tool call
+        _repeat_count: int = 0     # consecutive identical tool calls
 
         for _iteration in range(max_iterations):
             tool_calls_this_round: list[dict] = []
@@ -210,6 +214,25 @@ class ChatSession:
 
             if not tool_calls_this_round:
                 hit_limit = False
+                break
+
+            # ── Loop detection (openclaw pattern) ────────────────────────────
+            call_sig = "|".join(
+                f"{tc.get('name')}:{_json.dumps(tc.get('args', {}), sort_keys=True)}"
+                for tc in tool_calls_this_round
+            )
+            if call_sig == _prev_call_sig:
+                _repeat_count += 1
+            else:
+                _repeat_count = 1
+                _prev_call_sig = call_sig
+
+            if _repeat_count >= _LOOP_DETECT_THRESHOLD:
+                log.warning("[send_with_tools] Loop detected: %s repeated %d times",
+                            tool_calls_this_round[0].get("name"), _repeat_count)
+                yield ChatEvent(type="error",
+                                content=f"Tool loop detected: {tool_calls_this_round[0].get('name')} "
+                                        f"called {_repeat_count} times with identical arguments")
                 break
 
             # Execute tools and inject results into history for next LLM call
@@ -344,7 +367,7 @@ class ChatSession:
 
         for tc in tc_accum.values():
             try:
-                args = _json.loads(tc["args"]) if tc["args"] else {}
+                args = _json.loads(repair_json(tc["args"])) if tc["args"] else {}
             except Exception:
                 args = {}
             yield ChatEvent(type="tool_call", content=_json.dumps({

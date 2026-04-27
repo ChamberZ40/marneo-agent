@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2] - 2026-04-27
+
+### Added
+- **JSON argument auto-repair** (hermes pattern): handles trailing commas, unclosed brackets, Python None/True/False, markdown fences, single quotes
+- **Tool loop detection** (openclaw pattern): consecutive identical tool calls (same name + args) auto-break at threshold 3
+- **Hermetic test isolation**: strips credential env vars, redirects MARNEO_HOME, sets deterministic TZ/LANG/PYTHONHASHSEED
+- 13 new tests (190 total)
+
 ## [0.1.1] - 2026-04-27
 
 ### Fixed
