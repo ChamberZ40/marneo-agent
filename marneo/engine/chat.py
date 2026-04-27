@@ -390,33 +390,6 @@ class ChatSession:
                     "id": block.id, "name": block.name, "args": block.input,
                 }))
 
-
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url)
-
-        msgs: list[dict] = []
-        if self.system_prompt:
-            msgs.append({"role": "system", "content": self.system_prompt})
-        msgs.extend(self.messages)
-
-        stream = await client.chat.completions.create(
-            model=provider.model,
-            messages=msgs,  # type: ignore[arg-type]
-            max_tokens=4096,
-            stream=True,
-        )
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta is None:
-                continue
-            reasoning = getattr(delta, "reasoning_content", None)
-            if reasoning:
-                yield ChatEvent(type="thinking", content=reasoning)
-            if delta.content:
-                yield ChatEvent(type="text", content=delta.content)
-
     async def _call_anthropic(self, provider: ResolvedProvider) -> AsyncIterator[ChatEvent]:
         import anthropic
         client = anthropic.AsyncAnthropic(api_key=provider.api_key, base_url=provider.base_url)
