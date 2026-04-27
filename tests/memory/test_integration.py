@@ -7,6 +7,7 @@ from marneo.memory.session_memory import SessionMemory, ContextBudget
 from marneo.memory.episodes import EpisodeStore, Episode
 from marneo.memory.retriever import HybridRetriever
 from marneo.memory.core import CoreMemory
+from marneo.memory.skill_index import index_skills_into_store
 
 
 # ---------------------------------------------------------------------------
@@ -123,3 +124,46 @@ class TestEpisodeExtraction:
 
         episodes = store.get_all()
         assert len(episodes) == 0
+
+
+# ---------------------------------------------------------------------------
+# D3: Skill indexing and retrieval
+# ---------------------------------------------------------------------------
+
+class TestSkillIndexingAndRetrieval:
+    """Verify skill files are indexed and retrievable via HybridRetriever."""
+
+    def test_skill_indexing_and_retrieval(self, tmp_path):
+        """Create a tmp skills dir with a .md skill file, index, then retrieve."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "feishu-bitable.md").write_text(
+            "---\nname: 飞书多维表格操作\n"
+            "description: 创建、读取、写入飞书多维表格\n"
+            "enabled: true\n---\n\n详细内容",
+            encoding="utf-8",
+        )
+
+        store = EpisodeStore(tmp_path / "episodes.db")
+
+        # Add a few unrelated episodes so BM25 IDF produces positive scores
+        store.add(Episode(id="ep_filler1", content="Docker 容器部署配置", type="decision"))
+        store.add(Episode(id="ep_filler2", content="Python pandas 数据处理", type="discovery"))
+
+        count = index_skills_into_store(skills_dir, store)
+        assert count == 1
+
+        # Verify the skill episode is in the store with correct metadata
+        episodes = store.list_recent(source="skill")
+        assert len(episodes) == 1
+        skill_ep = episodes[0]
+        assert skill_ep.source == "skill"
+        assert skill_ep.skill_id == "feishu-bitable"
+        assert "飞书多维表格" in skill_ep.content
+
+        # Verify retriever can find it via BM25 (needs multiple docs for positive IDF)
+        retriever = HybridRetriever(store, tmp_path / "vectors.npy")
+        retriever.rebuild_index()
+        results = retriever.retrieve_bm25("飞书", n=3)
+        assert len(results) > 0
+        assert any(r.skill_id == "feishu-bitable" for r in results)
