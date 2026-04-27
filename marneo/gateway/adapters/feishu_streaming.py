@@ -180,11 +180,7 @@ class FeishuStreamingCard:
             },
             "body": {"elements": elements},
         }
-        if sender_name:
-            card_json["header"] = {
-                "title": {"tag": "plain_text", "content": f"💬 {sender_name}"},
-                "template": "blue",
-            }
+        # No header — clean card without blue bar
 
         payload = json.dumps(
             {"type": "card_json", "data": json.dumps(card_json, ensure_ascii=False)},
