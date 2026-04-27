@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.3] - 2026-04-27
+
+### Added
+- **FTS5 full-text search** (hermes pattern): cross-session keyword search across episode content, type, tags, project via SQLite FTS5 virtual table with auto-sync triggers
+- **Model failover + credential pool**: ProviderPool with primary + fallback providers, auto-switch on auth errors, exponential backoff on rate limits, 5min cooldown after 3 failures
+- **Token usage tracking**: TokenTracker captures input/output/cache tokens from OpenAI and Anthropic responses, per-model breakdown, session summary
+- **Episode → Core auto-promotion** (openclaw scoring): 6-factor scoring formula (relevance 30% / frequency 24% / freshness 15% / diversity 15% / size 10% / promoted 6%), threshold-based promotion
+- **Platform-specific hints**: system prompt adapts to channel capabilities (Feishu markdown+cards, Telegram markdown, WeChat plain text, Discord embeds, CLI)
+- **last_accessed_at** timestamp on episodes (with migration for pre-v0.1.2 DBs)
+- 22 new tests (212 total)
+
 ## [0.1.2] - 2026-04-27
 
 ### Added

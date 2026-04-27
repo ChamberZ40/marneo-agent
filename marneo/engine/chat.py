@@ -10,6 +10,7 @@ from typing import Any
 
 from marneo.engine.provider import resolve_provider, ResolvedProvider
 from marneo.engine.json_repair import repair_json
+from marneo.engine.token_tracker import TokenTracker
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,7 @@ class ChatSession:
     """Maintains conversation history for one session."""
     messages: list[dict[str, Any]] = field(default_factory=list)
     system_prompt: str = ""
+    token_tracker: TokenTracker = field(default_factory=TokenTracker)
 
     def clear(self) -> None:
         self.messages.clear()
@@ -338,12 +340,15 @@ class ChatSession:
             tool_choice="auto",
             max_tokens=4096,
             stream=True,
+            stream_options={"include_usage": True},
         )
 
         tc_accum: dict[int, dict] = {}
 
         async for chunk in stream:
             if not chunk.choices:
+                # Final chunk with usage stats (stream_options.include_usage)
+                self.token_tracker.record_from_openai(provider.model, chunk)
                 continue
             delta = chunk.choices[0].delta
             if delta is None:

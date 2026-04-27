@@ -43,10 +43,35 @@ class EpisodeStore:
         importance REAL DEFAULT 0.5,
         access_count INTEGER DEFAULT 0,
         promoted_to_core INTEGER DEFAULT 0,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        last_accessed_at TEXT DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_source ON episodes(source);
     CREATE INDEX IF NOT EXISTS idx_access ON episodes(access_count);
+    """
+
+    _FTS_SCHEMA = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
+        content, type, tags, project,
+        content='episodes', content_rowid='rowid'
+    );
+    """
+
+    _FTS_TRIGGERS = """
+    CREATE TRIGGER IF NOT EXISTS episodes_ai AFTER INSERT ON episodes BEGIN
+        INSERT INTO episodes_fts(rowid, content, type, tags, project)
+        VALUES (new.rowid, new.content, new.type, new.tags, new.project);
+    END;
+    CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
+        INSERT INTO episodes_fts(episodes_fts, rowid, content, type, tags, project)
+        VALUES ('delete', old.rowid, old.content, old.type, old.tags, old.project);
+    END;
+    CREATE TRIGGER IF NOT EXISTS episodes_au AFTER UPDATE ON episodes BEGIN
+        INSERT INTO episodes_fts(episodes_fts, rowid, content, type, tags, project)
+        VALUES ('delete', old.rowid, old.content, old.type, old.tags, old.project);
+        INSERT INTO episodes_fts(rowid, content, type, tags, project)
+        VALUES (new.rowid, new.content, new.type, new.tags, new.project);
+    END;
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -62,6 +87,18 @@ class EpisodeStore:
     def _init_db(self) -> None:
         with self._conn() as conn:
             conn.executescript(self._SCHEMA)
+            # Migrate: add last_accessed_at column if missing (pre-v0.1.2 DBs)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(episodes)").fetchall()}
+            if "last_accessed_at" not in cols:
+                conn.execute("ALTER TABLE episodes ADD COLUMN last_accessed_at TEXT DEFAULT ''")
+            # FTS5 full-text search index
+            conn.executescript(self._FTS_SCHEMA)
+            conn.executescript(self._FTS_TRIGGERS)
+            # Backfill FTS for existing rows not yet indexed
+            conn.execute("""
+                INSERT OR IGNORE INTO episodes_fts(rowid, content, type, tags, project)
+                SELECT rowid, content, type, tags, project FROM episodes
+            """)
 
     def _row_to_episode(self, row: sqlite3.Row) -> Episode:
         return Episode(
@@ -118,9 +155,25 @@ class EpisodeStore:
     def increment_access(self, ep_id: str) -> None:
         with self._conn() as conn:
             conn.execute(
-                "UPDATE episodes SET access_count = access_count + 1 WHERE id=?",
-                (ep_id,),
+                "UPDATE episodes SET access_count = access_count + 1, "
+                "last_accessed_at = ? WHERE id=?",
+                (time.strftime("%Y-%m-%dT%H:%M:%S"), ep_id),
             )
+
+    def search_fts(self, query: str, limit: int = 10) -> list[Episode]:
+        """Full-text search across content, type, tags, project via FTS5."""
+        if not query.strip():
+            return []
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT e.* FROM episodes e
+                   JOIN episodes_fts f ON e.rowid = f.rowid
+                   WHERE episodes_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (query, limit),
+            ).fetchall()
+        return [self._row_to_episode(r) for r in rows]
 
     def get_promotion_candidates(self, min_access: int = 5) -> list[Episode]:
         with self._conn() as conn:

@@ -41,21 +41,9 @@ class SessionStore:
 
     async def _create_engine(self, platform: str = "") -> Any:
         from marneo.engine.chat import ChatSession
+        from marneo.gateway.platform_hints import get_platform_hint
 
-        base_system = (
-            "You are a work-focused digital employee operating inside Feishu (Lark). "
-            "You are capable, direct, and action-oriented. "
-            "You have real Feishu tools: lark_cli (run any Feishu command), "
-            "feishu_send_mention (@mention users in Feishu), "
-            "feishu_search_user (search for users). "
-            "Each message includes [Feishu group | open_id=... | chat_id=...] context — "
-            "use the chat_id directly with lark_cli and feishu_send_mention. "
-            "To find a group member's open_id: call lark_cli with 'chat members --chat-id <chat_id>'. "
-            "When asked to @mention someone, DO IT — call lark_cli to get members, "
-            "find the person, then call feishu_send_mention. "
-            "Never say you cannot access Feishu or send messages. "
-            "Be concise. Report results, not intentions."
-        )
+        platform_hint = get_platform_hint(platform)
 
         if ":" in platform:
             emp_name = platform.split(":", 1)[1]
@@ -78,11 +66,11 @@ class SessionStore:
                 sm = SessionMemory(emp_name, soul=soul)
                 system_prompt = sm.build_system_prompt()
 
-                # Session startup context
+                # Session startup context with platform-specific hints
                 startup_ctx = (
                     f"Session started at {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. "
                     f"Employee: {display_name} (id: {emp_name}). "
-                    f"Platform: Feishu. "
+                    f"{platform_hint} "
                     f"You have tools available: bash, read_file, write_file, edit_file, "
                     f"glob, grep, web_fetch, web_search, lark_cli, "
                     f"feishu_send_mention, feishu_search_user, feishu_create_doc. "
@@ -97,6 +85,13 @@ class SessionStore:
             except Exception as e:
                 log.warning("[Session] SessionMemory init failed for %s: %s", emp_name, e)
 
+        # Fallback: basic system prompt with platform hint
+        base_system = (
+            "You are a work-focused digital employee running inside Marneo. "
+            "You are capable, direct, and action-oriented. "
+            f"{platform_hint} "
+            "Be concise. Report results, not intentions."
+        )
         return ChatSession(system_prompt=base_system)
 
     def _evict(self) -> None:

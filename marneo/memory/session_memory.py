@@ -151,17 +151,75 @@ class SessionMemory:
             log.debug("[SessionMemory] Episode extraction error: %s", e)
 
     def check_and_promote(self, min_access: int = 5) -> int:
-        """Promote high-access episodes to core memory."""
+        """Score and promote high-value episodes to core memory.
+
+        Scoring formula (openclaw short-term-promotion pattern):
+          relevance  30%  — importance field (set by extractor heuristic)
+          frequency  24%  — access_count normalized to 0-1
+          freshness  15%  — days since creation (decay: 1 / (1 + days/30))
+          diversity  15%  — type rarity bonus (less common types score higher)
+          size       10%  — shorter episodes preferred (1 / (1 + chars/200))
+          promoted    6%  — penalty if already promoted (always 1.0 here)
+        """
+        import time as _time
+
         if self._store is None:
             return 0
         candidates = self._store.get_promotion_candidates(min_access=min_access)
+        if not candidates:
+            return 0
+
+        # Type frequency for diversity scoring
+        all_eps = self._store.get_all()
+        type_counts: dict[str, int] = {}
+        for ep in all_eps:
+            type_counts[ep.type] = type_counts.get(ep.type, 0) + 1
+        total_eps = max(len(all_eps), 1)
+        max_access = max((ep.access_count for ep in candidates), default=1) or 1
+
         core = self._get_core()
         promoted = 0
+        now = _time.time()
+
+        scored: list[tuple[float, Any]] = []
         for ep in candidates:
+            # Parse created_at
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(ep.created_at[:10], "%Y-%m-%d")
+                days_old = (now - dt.timestamp()) / 86400
+            except Exception:
+                days_old = 30
+
+            relevance = ep.importance                                  # 0-1
+            frequency = ep.access_count / max_access                   # 0-1
+            freshness = 1.0 / (1.0 + days_old / 30)                   # decay curve
+            type_freq = type_counts.get(ep.type, 1) / total_eps
+            diversity = 1.0 - type_freq                                # rare types score higher
+            size = 1.0 / (1.0 + len(ep.content) / 200)                # shorter preferred
+
+            score = (
+                0.30 * relevance
+                + 0.24 * frequency
+                + 0.15 * freshness
+                + 0.15 * diversity
+                + 0.10 * size
+                + 0.06 * 1.0  # not-yet-promoted = full bonus
+            )
+            scored.append((score, ep))
+
+        # Promote top scorers that fit in core budget
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for score, ep in scored:
+            if score < 0.3:
+                break  # below threshold
             if len(core.content) + len(ep.content) < self._budget.core_memory_max:
                 core.add(ep.content, source="promoted")
                 self._store.mark_promoted(ep.id)
                 promoted += 1
+                log.info("[Memory] Promoted episode %s (score=%.2f): %s",
+                         ep.id, score, ep.content[:60])
+
         return promoted
 
     def get_memory_tools(self) -> tuple[list[dict], dict]:

@@ -1,6 +1,6 @@
 [project]
 name = "marneo"
-version = "0.1.2"
+version = "0.1.3"
 description = "Marneo Agent — Project-focused digital employees"
 requires-python = ">=3.11"
 dependencies = [
