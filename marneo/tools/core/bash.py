@@ -18,7 +18,7 @@ from marneo.tools.registry import registry, tool_result, tool_error
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = 60
+_DEFAULT_TIMEOUT = 120
 _MAX_OUTPUT = 50_000
 
 # Block clearly catastrophic patterns only.
@@ -95,7 +95,7 @@ registry.register(
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Bash command to execute"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds (default 60)", "default": 60},
+                "timeout": {"type": "integer", "description": "Timeout in seconds (default 120)", "default": 120},
             },
             "required": ["command"],
         },

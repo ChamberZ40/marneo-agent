@@ -9,7 +9,7 @@ from marneo.tools.registry import registry as _tool_registry
 
 log = logging.getLogger(__name__)
 DEDUP_TTL = 60
-REPLY_TIMEOUT = 60
+REPLY_TIMEOUT = 300
 MAX_REPLY_LEN = 3000
 
 
