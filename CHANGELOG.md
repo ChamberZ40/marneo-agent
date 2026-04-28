@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.7] - 2026-04-28
+
+### Added
+- **MCP protocol bridge** (hermes pattern): standalone module for connecting to any MCP server (Node.js, Go, Rust, Python) via subprocess + stdin/stdout JSON-RPC. Supports tool discovery, tool calling, env var expansion, reconnect with backoff. NOT wired into gateway yet — designed as a capability for future integration.
+  - `McpBridge`: single server connection lifecycle (connect/discover/call/disconnect)
+  - `McpManager`: multi-server management
+  - Graceful degradation when `mcp` package not installed
+
 ## [0.1.6] - 2026-04-27
 
 ### Added
