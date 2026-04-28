@@ -1,11 +1,14 @@
 # marneo/tools/core/feishu_tools.py
-"""Feishu-specific tools: @mention messaging, contact search.
+"""Feishu-specific tools: @mention messaging, contact search, file sending.
 
 Ported from openclaw/extensions/feishu/src/mention.ts.
 """
 from __future__ import annotations
 
 import json
+import mimetypes
+import os
+from pathlib import Path
 from typing import Any
 
 from marneo.tools.registry import registry, tool_result, tool_error
@@ -234,4 +237,214 @@ registry.register(
     },
     handler=feishu_create_doc,
     emoji="📄",
+)
+
+
+# ── File / image sending ────────────────────────────────────────────────────
+
+_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024   # 10 MB
+_MAX_FILE_BYTES = 20 * 1024 * 1024    # 20 MB
+
+
+def _is_image_file(file_path: str) -> bool:
+    """Detect if a file should be uploaded as an image based on extension and MIME."""
+    ext = Path(file_path).suffix.lower()
+    if ext in _IMAGE_EXTENSIONS:
+        return True
+    mime, _ = mimetypes.guess_type(file_path)
+    return mime is not None and mime.startswith("image/")
+
+
+def _get_feishu_credentials() -> tuple[str, str, str]:
+    """Return (app_id, app_secret, domain) from any configured employee.
+
+    Raises ValueError if no credentials are found.
+    """
+    from marneo.employee.feishu_config import list_configured_employees, load_feishu_config
+
+    for emp in list_configured_employees():
+        cfg = load_feishu_config(emp)
+        if cfg and cfg.is_complete:
+            return cfg.app_id, cfg.app_secret, cfg.domain
+    raise ValueError("No Feishu credentials configured")
+
+
+def _build_client(app_id: str, app_secret: str, domain: str) -> Any:
+    """Build a lark-oapi Client (sync helper)."""
+    import lark_oapi as lark
+
+    lark_domain = lark.LARK_DOMAIN if domain == "lark" else lark.FEISHU_DOMAIN
+    return (
+        lark.Client.builder()
+        .app_id(app_id).app_secret(app_secret).domain(lark_domain).build()
+    )
+
+
+def feishu_send_file(args: dict[str, Any], **kw: Any) -> str:
+    """Upload a local file/image to Feishu and send it to a chat."""
+    file_path = args.get("file_path", "").strip()
+    chat_id = args.get("chat_id", "").strip()
+    file_name = args.get("file_name", "").strip()
+
+    if not file_path:
+        return tool_error("file_path is required")
+    if not chat_id:
+        return tool_error("chat_id is required")
+    if not os.path.isfile(file_path):
+        return tool_error(f"File not found: {file_path}")
+
+    file_size = os.path.getsize(file_path)
+    is_image = _is_image_file(file_path)
+
+    if is_image and file_size > _MAX_IMAGE_BYTES:
+        return tool_error(f"Image too large ({file_size} bytes). Max is {_MAX_IMAGE_BYTES} bytes (10 MB).")
+    if not is_image and file_size > _MAX_FILE_BYTES:
+        return tool_error(f"File too large ({file_size} bytes). Max is {_MAX_FILE_BYTES} bytes (20 MB).")
+
+    if not file_name:
+        file_name = Path(file_path).name
+
+    try:
+        app_id, app_secret, domain = _get_feishu_credentials()
+    except ValueError as exc:
+        return tool_error(str(exc))
+
+    try:
+        import asyncio
+        from lark_oapi.api.im.v1 import (
+            CreateMessageRequest, CreateMessageRequestBody,
+        )
+
+        client = _build_client(app_id, app_secret, domain)
+
+        async def _upload_and_send() -> dict:
+            if is_image:
+                key = await _upload_image(client, file_path)
+                content = json.dumps({"image_key": key})
+                msg_type = "image"
+            else:
+                key = await _upload_file(client, file_path, file_name)
+                content = json.dumps({"file_key": key, "file_name": file_name})
+                msg_type = "file"
+
+            body = (
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type(msg_type)
+                .content(content)
+                .build()
+            )
+            req = (
+                CreateMessageRequest.builder()
+                .receive_id_type("chat_id")
+                .request_body(body)
+                .build()
+            )
+            resp = await asyncio.to_thread(client.im.v1.message.create, req)
+
+            if resp and getattr(resp, "success", lambda: False)():
+                msg_id = getattr(getattr(resp, "data", None), "message_id", "")
+                return {"ok": True, "message_id": msg_id, "file_name": file_name, "msg_type": msg_type}
+
+            return {
+                "error": (
+                    f"Send failed: code={getattr(resp, 'code', '?')} "
+                    f"msg={getattr(resp, 'msg', '?')}"
+                ),
+            }
+
+        from marneo.tools.registry import _run_async
+        result = _run_async(lambda: _upload_and_send())
+        return json.dumps(result, ensure_ascii=False)
+
+    except Exception as exc:
+        return tool_error(str(exc))
+
+
+async def _upload_image(client: Any, file_path: str) -> str:
+    """Upload an image to Feishu. Returns image_key.
+
+    Uses POST /open-apis/im/v1/images with image_type=message.
+    """
+    import asyncio
+    from lark_oapi.api.im.v1 import CreateImageRequest, CreateImageRequestBody
+
+    with open(file_path, "rb") as f:
+        body = (
+            CreateImageRequestBody.builder()
+            .image_type("message")
+            .image(f)
+            .build()
+        )
+        req = CreateImageRequest.builder().request_body(body).build()
+        resp = await asyncio.to_thread(client.im.v1.image.create, req)
+
+    if not resp or not getattr(resp, "success", lambda: False)():
+        code = getattr(resp, "code", "?")
+        msg = getattr(resp, "msg", "?")
+        raise RuntimeError(f"Image upload failed: code={code} msg={msg}")
+
+    data = getattr(resp, "data", None)
+    image_key = getattr(data, "image_key", "") if data else ""
+    if not image_key:
+        raise RuntimeError("Image upload returned empty image_key")
+    return image_key
+
+
+async def _upload_file(client: Any, file_path: str, file_name: str) -> str:
+    """Upload a general file to Feishu. Returns file_key.
+
+    Uses POST /open-apis/im/v1/files with file_type=stream.
+    """
+    import asyncio
+    from lark_oapi.api.im.v1 import CreateFileRequest, CreateFileRequestBody
+
+    with open(file_path, "rb") as f:
+        body = (
+            CreateFileRequestBody.builder()
+            .file_type("stream")
+            .file_name(file_name)
+            .file(f)
+            .build()
+        )
+        req = CreateFileRequest.builder().request_body(body).build()
+        resp = await asyncio.to_thread(client.im.v1.file.create, req)
+
+    if not resp or not getattr(resp, "success", lambda: False)():
+        code = getattr(resp, "code", "?")
+        msg = getattr(resp, "msg", "?")
+        raise RuntimeError(f"File upload failed: code={code} msg={msg}")
+
+    data = getattr(resp, "data", None)
+    file_key = getattr(data, "file_key", "") if data else ""
+    if not file_key:
+        raise RuntimeError("File upload returned empty file_key")
+    return file_key
+
+
+registry.register(
+    name="feishu_send_file",
+    description="Send a file or image to a Feishu chat.",
+    schema={
+        "name": "feishu_send_file",
+        "description": (
+            "Send a file or image to a Feishu chat. "
+            "Uploads the file to Feishu and sends it as a chat attachment. "
+            "Images (jpg/png/gif/webp) are sent as image messages; "
+            "other files are sent as file attachments. "
+            "Max 10 MB for images, 20 MB for other files."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Absolute path to the local file"},
+                "chat_id": {"type": "string", "description": "Target chat ID (oc_xxx) from message context"},
+                "file_name": {"type": "string", "description": "Optional display name (defaults to filename from path)"},
+            },
+            "required": ["file_path", "chat_id"],
+        },
+    },
+    handler=feishu_send_file,
+    emoji="📎",
 )

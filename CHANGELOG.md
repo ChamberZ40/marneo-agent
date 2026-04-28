@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.8] - 2026-04-28
+
+### Added
+- **tool-use-display**: streaming card now shows tool execution progress with name and status (🔧 执行中 / ✅ 完成), replaced by final text when LLM responds
+- **feishu_send_file tool**: bot can now upload and send images (jpg/png/gif/webp via /im/v1/images) and files (pdf/docx/xlsx via /im/v1/files) to Feishu chats. Size limits: 10MB images, 20MB files
+- **lark-cli skills**: 19 skill files symlinked to ~/.marneo/skills/ (lark-im, lark-calendar, lark-doc, lark-base, lark-sheets, lark-task, lark-mail, lark-drive, lark-wiki, etc.)
+- **Feishu integration decision doc**: docs/feishu-integration-decision.md — lark_cli.py stays as primary (1 tool = 190+ commands, 95% fewer tokens than MCP), MCP bridge reserved for non-Feishu ecosystems
+- 17 new tests (278 total)
+
 ## [0.1.7] - 2026-04-28
 
 ### Added

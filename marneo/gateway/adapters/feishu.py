@@ -93,6 +93,17 @@ def _outbound_msg_type_and_payload(text: str) -> tuple[str, str]:
     return "text", json.dumps({"text": text}, ensure_ascii=False)
 
 
+def _format_tool_trace(trace: list[dict]) -> str:
+    """Format tool call trace for display in the streaming card."""
+    lines = ["⏳ **工具调用中...**\n"]
+    for t in trace:
+        emoji = "✅" if t.get("done") else "🔧"
+        name = t["name"]
+        status = "完成" if t.get("done") else "执行中..."
+        lines.append(f"{emoji} **{name}** — {status}")
+    return "\n".join(lines)
+
+
 _REACTION_IN_PROGRESS = "SaluteFace"  # "致敬" badge while processing
 _REACTION_FAILURE = "CrossMark"    # ✗ on error
 _REACTION_CACHE_SIZE = 1024        # LRU cap for (msg_id → reaction_id)
@@ -1077,21 +1088,40 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
             # Stream LLM output to card
             accumulated = ""
+            tool_trace: list[dict] = []  # tracks tool calls for display
 
             try:
                 async for event in engine.send_with_tools(
                     msg.text, registry=registry, attachments=msg.attachments or None
                 ):
                     if event.type == "text" and event.content:
+                        # First text after tool calls — clear trace, show only final text
+                        if tool_trace:
+                            tool_trace.clear()
                         accumulated += event.content
                         await card.update(accumulated)
                     elif event.type == "tool_call":
                         # Tool is being called — the text so far is narration, not final answer.
                         # Reset accumulated so only post-tool text appears in the card.
                         accumulated = ""
-                        await card.update("⏳ 工具执行中...")
+                        # Parse tool name from event content (JSON: {"name": ..., ...})
+                        tool_name = "tool"
+                        try:
+                            tc_data = json.loads(event.content)
+                            tool_name = tc_data.get("name", "tool")
+                        except Exception:
+                            pass
+                        tool_trace.append({"name": tool_name, "done": False})
+                        await card.update(_format_tool_trace(tool_trace))
                     elif event.type == "tool_result":
-                        log.debug("[Streaming] Tool result: %s", event.content[:100])
+                        log.debug("[Streaming] Tool result: %s", event.content[:100] if event.content else "")
+                        # Mark the last pending tool as completed
+                        for t in reversed(tool_trace):
+                            if not t.get("done"):
+                                t["done"] = True
+                                break
+                        if tool_trace:
+                            await card.update(_format_tool_trace(tool_trace))
             except Exception as exc:
                 log.error("[Streaming] LLM error during streaming: %s", exc)
                 accumulated = accumulated or f"处理出错：{exc}"
