@@ -22,7 +22,7 @@ _DEFAULT_TIMEOUT = 300  # 5 minutes
 class PendingQuestion:
     """A question awaiting user response."""
 
-    __slots__ = ("question_id", "chat_id", "question", "choices", "future", "created_at", "loop")
+    __slots__ = ("question_id", "chat_id", "question", "choices", "future", "created_at", "loop", "questions_data")
 
     def __init__(
         self,
@@ -40,6 +40,7 @@ class PendingQuestion:
         self.future = future
         self.loop = loop
         self.created_at = time.monotonic()
+        self.questions_data: list[dict] = []  # full question objects for form parsing
 
 
 class PendingQuestionStore:
@@ -84,6 +85,19 @@ class PendingQuestionStore:
         log.info("[PendingQ] Created %s for chat %s: %s",
                  question_id, chat_id[:12] if chat_id else "?", question[:60])
         return question_id, future
+
+    def set_questions(self, question_id: str, questions: list[dict]) -> None:
+        """Store full question objects for form answer parsing."""
+        with self._lock:
+            pq = self._pending.get(question_id)
+            if pq:
+                pq.questions_data = questions
+
+    def get_questions(self, question_id: str) -> list[dict]:
+        """Get stored question objects for a pending question."""
+        with self._lock:
+            pq = self._pending.get(question_id)
+            return pq.questions_data if pq else []
 
     def resolve(self, question_id: str, answer: str) -> bool:
         """Resolve a pending question with user's answer.

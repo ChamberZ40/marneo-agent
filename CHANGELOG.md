@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9] - 2026-04-28
+
+### Changed
+- **ask_user rewrite (openclaw pattern)**: form container with select_static dropdowns, left-right column_set layout, option descriptions, blue card header with "需要你的确认" + "待回答" tag, supports 1-6 questions per card, single "📮 提交" submit button. Card Kit v2 entity creation. Backward compatible with single question+choices format.
+- **Card action handler**: now handles form_value submit (form_action_type: "submit") in addition to legacy button clicks. Parses selection/answer fields per question index.
+- **PendingQuestionStore**: added `set_questions`/`get_questions` for storing full question objects needed for form answer parsing
+
 ## [0.1.8] - 2026-04-28
 
 ### Added

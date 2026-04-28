@@ -984,29 +984,85 @@ class FeishuChannelAdapter(BaseChannelAdapter):
     # -------------------------------------------------------------------------
 
     def _on_card_action(self, data: Any) -> Any:
-        """Route card button clicks — resolve ask_user questions or dispatch as synthetic text."""
+        """Route card actions — resolve ask_user form submissions or dispatch as synthetic text."""
         try:
             from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
             action = getattr(data, "action", None) or {}
             value = getattr(action, "value", {}) or {}
+            form_value = getattr(action, "form_value", None) or {}
+            action_name = getattr(action, "name", "") or ""
+            action_tag = getattr(action, "tag", "") or ""
             operator = getattr(data, "operator", None)
             user_id = getattr(operator, "open_id", "") if operator else ""
             chat_id = getattr(data, "open_chat_id", "") or ""
             msg_id = getattr(data, "open_message_id", "") or ""
 
-            # ── ask_user question resolution ────────────────────────────────
-            marneo_question_id = value.get("marneo_question_id", "") if isinstance(value, dict) else ""
-            if marneo_question_id:
+            # ── ask_user form submit (openclaw pattern) ────────────────────────
+            # Detect form submit by button name prefix or tag
+            is_form_submit = False
+            question_id = ""
+
+            if action_name.startswith("ask_user_submit_"):
+                is_form_submit = True
+                question_id = action_name[len("ask_user_submit_"):]
+            elif action_tag in ("button", "form_submit") and form_value:
+                is_form_submit = True
+            # Legacy button-based resolution
+            elif isinstance(value, dict) and value.get("marneo_question_id"):
+                question_id = value["marneo_question_id"]
                 answer = value.get("answer", "")
                 from marneo.gateway.pending_questions import pending_question_store
-                resolved = pending_question_store.resolve(marneo_question_id, answer)
+                resolved = pending_question_store.resolve(question_id, answer)
                 if resolved:
-                    log.info("[Feishu] Card action resolved question %s: %s",
-                             marneo_question_id, answer[:60])
-                    resp = P2CardActionTriggerResponse()
-                    resp.toast = {"type": "info", "content": "已收到回复"}
-                    return resp
-                # Question not found (expired/already resolved) — fall through
+                    log.info("[Feishu] Card button resolved question %s: %s",
+                             question_id, answer[:60])
+                    return P2CardActionTriggerResponse()
+
+            if is_form_submit:
+                from marneo.gateway.pending_questions import pending_question_store
+
+                # Look up question by ID or chat-scoped fallback
+                if not question_id:
+                    # Try to find from form_value or value
+                    if isinstance(value, dict):
+                        question_id = value.get("operation_id", "")
+
+                questions = pending_question_store.get_questions(question_id) if question_id else []
+
+                if not questions and not form_value:
+                    return P2CardActionTriggerResponse()
+
+                # Parse form_value → answers
+                answers = {}
+                for i, q in enumerate(questions):
+                    opts = q.get("options", [])
+                    if not opts:
+                        # Free-text input
+                        val = form_value.get(f"answer_{i}", "")
+                        if isinstance(val, str) and val.strip():
+                            answers[q.get("question", "")] = val.strip()
+                    elif q.get("multiSelect"):
+                        val = form_value.get(f"selection_{i}", [])
+                        if isinstance(val, list) and val:
+                            answers[q.get("question", "")] = ", ".join(str(v) for v in val)
+                        elif isinstance(val, str) and val.strip():
+                            answers[q.get("question", "")] = val.strip()
+                    else:
+                        val = form_value.get(f"selection_{i}", "")
+                        if isinstance(val, str) and val.strip():
+                            answers[q.get("question", "")] = val.strip()
+
+                # Format answers as readable text
+                if answers:
+                    answer_lines = "\n".join(f"- {q}: {a}" for q, a in answers.items())
+                    answer_text = f"用户回答了你的问题:\n{answer_lines}"
+                else:
+                    answer_text = str(form_value)
+
+                resolved = pending_question_store.resolve(question_id, answer_text)
+                if resolved:
+                    log.info("[Feishu] Form submit resolved question %s", question_id)
+                    return P2CardActionTriggerResponse()
 
             # ── Existing behavior: dispatch as synthetic text ────────────────
             cmd = value.get("command", str(value)) if isinstance(value, dict) else str(value)

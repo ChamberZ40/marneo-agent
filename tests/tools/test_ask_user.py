@@ -25,13 +25,13 @@ def test_tool_registered():
 
 
 def test_tool_schema_has_question_required():
-    """The schema must require 'question' and define 'choices' as optional."""
+    """The schema must define 'questions' array and backward-compat 'question'."""
     entry = registry.get_entry("ask_user")
     assert entry is not None
     params = entry.schema["parameters"]
+    assert "questions" in params["properties"]
+    # Backward compat fields
     assert "question" in params["properties"]
-    assert "choices" in params["properties"]
-    assert "question" in params["required"]
 
 
 # ── test_card_json_structure ────────────────────────────────────────────────
@@ -155,7 +155,6 @@ async def test_handler_returns_answer_on_success():
                 })
                 parsed = json.loads(result)
                 assert parsed["answer"] == "approved"
-                assert parsed["question"] == "Approve?"
                 assert parsed["question_id"] == "mq_ok"
     finally:
         ask_user_ctx.reset(token)
