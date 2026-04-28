@@ -1,6 +1,5 @@
 # tests/tools/test_ask_user.py
-"""Tests for ask_user tool — registration, card JSON, and handler logic."""
-import asyncio
+"""Tests for ask_user tool (openclaw non-blocking pattern)."""
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,150 +10,103 @@ from marneo.tools.core.ask_user import (
     AskUserContext,
     ask_user_ctx,
     ask_user_handler,
+    build_ask_user_card,
+    build_processing_card,
+    build_answered_card,
+    build_expired_card,
 )
 
 
-# ── test_tool_registered ────────────────────────────────────────────────────
-
 def test_tool_registered():
-    """ask_user must be present in the tool registry after import."""
     entry = registry.get_entry("ask_user")
     assert entry is not None
-    assert entry.name == "ask_user"
     assert entry.is_async is True
 
 
-def test_tool_schema_has_question_required():
-    """The schema must define 'questions' array and backward-compat 'question'."""
+def test_tool_schema_has_questions():
     entry = registry.get_entry("ask_user")
-    assert entry is not None
     params = entry.schema["parameters"]
     assert "questions" in params["properties"]
-    # Backward compat fields
-    assert "question" in params["properties"]
 
 
-# ── test_card_json_structure ────────────────────────────────────────────────
-# Card structure is tested implicitly through the integration tests below.
-# The _send_ask_card function builds and sends the card in one step.
+class TestCardBuilders:
+    _QUESTIONS = [
+        {"question": "Pick color?", "header": "Color", "options": [
+            {"label": "Red", "description": "Warm"},
+            {"label": "Blue", "description": "Cool"},
+        ], "multiSelect": False},
+    ]
 
+    def test_ask_user_card_has_form(self):
+        card = build_ask_user_card(self._QUESTIONS, "q1")
+        assert card["header"]["template"] == "blue"
+        body_elements = card["body"]["elements"]
+        assert body_elements[0]["tag"] == "form"
 
-# ── test_handler_requires_question ──────────────────────────────────────────
+    def test_ask_user_card_submit_button(self):
+        card = build_ask_user_card(self._QUESTIONS, "q1")
+        form_elems = card["body"]["elements"][0]["elements"]
+        submit = [e for e in form_elems if e.get("tag") == "button"]
+        assert len(submit) == 1
+        assert "ask_user_submit_q1" in submit[0].get("name", "")
+
+    def test_processing_card(self):
+        card = build_processing_card(self._QUESTIONS, {"Pick color?": "Red"})
+        assert card["header"]["template"] == "turquoise"
+
+    def test_answered_card(self):
+        card = build_answered_card(self._QUESTIONS, {"Pick color?": "Red"})
+        assert card["header"]["template"] == "green"
+
+    def test_expired_card(self):
+        card = build_expired_card(self._QUESTIONS)
+        assert card["header"]["template"] == "grey"
+
 
 @pytest.mark.asyncio
-async def test_handler_requires_question():
-    """Handler must return error when question is empty."""
-    result = await ask_user_handler({"question": ""})
+async def test_handler_no_questions():
+    result = await ask_user_handler({})
     parsed = json.loads(result)
     assert "error" in parsed
-    assert "required" in parsed["error"].lower()
 
 
 @pytest.mark.asyncio
-async def test_handler_requires_context():
-    """Handler must return error when ask_user_ctx is not set."""
-    # Ensure context var is cleared
+async def test_handler_no_context():
     token = ask_user_ctx.set(None)
     try:
-        result = await ask_user_handler({"question": "Hello?"})
+        result = await ask_user_handler({"questions": [
+            {"question": "test?", "header": "T", "options": [], "multiSelect": False}
+        ]})
         parsed = json.loads(result)
         assert "error" in parsed
-        assert "context" in parsed["error"].lower() or "feishu" in parsed["error"].lower()
     finally:
         ask_user_ctx.reset(token)
 
 
-# ── test_handler_truncates_choices_to_4 ─────────────────────────────────────
-
 @pytest.mark.asyncio
-async def test_handler_truncates_choices_to_4():
-    """When more than 4 choices are given, only the first 4 are kept."""
+async def test_handler_returns_pending():
+    """Non-blocking: handler returns {status: 'pending'} immediately."""
     adapter = MagicMock()
     adapter._domain = "feishu"
     adapter._app_id = "test_id"
     adapter._app_secret = "test_secret"
+    adapter._loop = None
 
-    ctx = AskUserContext(chat_id="chat_trunc", adapter=adapter)
+    ctx = AskUserContext(chat_id="chat1", adapter=adapter, sender_open_id="ou_test", msg_id="msg1")
     token = ask_user_ctx.set(ctx)
 
     try:
-        with patch("marneo.tools.core.ask_user._send_ask_card", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = True
-
-            # Create a future that resolves quickly to avoid hang
-            with patch("marneo.gateway.pending_questions.PendingQuestionStore.create") as mock_create:
-                loop = asyncio.get_running_loop()
-                future = loop.create_future()
-                future.set_result("choice_1")
-                mock_create.return_value = ("mq_trunc", future)
-
-                result = await ask_user_handler({
-                    "question": "Pick one?",
-                    "choices": ["a", "b", "c", "d", "e", "f"],
-                })
-
-                # Verify create was called with at most 4 choices
-                call_kwargs = mock_create.call_args
-                actual_choices = call_kwargs[1].get("choices") if call_kwargs[1] else call_kwargs[0][2]
-                assert len(actual_choices) <= 4
-    finally:
-        ask_user_ctx.reset(token)
-
-
-# ── test_handler_send_failure ───────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_handler_send_failure_returns_error():
-    """When card send fails, handler returns a tool error."""
-    adapter = MagicMock()
-    adapter._domain = "feishu"
-    adapter._app_id = "test_id"
-    adapter._app_secret = "test_secret"
-
-    ctx = AskUserContext(chat_id="chat_fail", adapter=adapter)
-    token = ask_user_ctx.set(ctx)
-
-    try:
-        with patch("marneo.tools.core.ask_user._send_ask_card", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = False  # Simulate send failure
-
-            result = await ask_user_handler({"question": "Will this fail?"})
-            parsed = json.loads(result)
-            assert "error" in parsed
-            assert "fail" in parsed["error"].lower()
-    finally:
-        ask_user_ctx.reset(token)
-
-
-# ── test_handler_returns_answer_on_success ──────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_handler_returns_answer_on_success():
-    """Full happy path: card sent, future resolved, handler returns answer."""
-    adapter = MagicMock()
-    adapter._domain = "feishu"
-    adapter._app_id = "test_id"
-    adapter._app_secret = "test_secret"
-
-    ctx = AskUserContext(chat_id="chat_ok", adapter=adapter)
-    token = ask_user_ctx.set(ctx)
-
-    try:
-        with patch("marneo.tools.core.ask_user._send_ask_card", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = True
-
-            with patch("marneo.gateway.pending_questions.PendingQuestionStore.create") as mock_create:
-                loop = asyncio.get_running_loop()
-                future = loop.create_future()
-                future.set_result("approved")
-                mock_create.return_value = ("mq_ok", future)
-
-                result = await ask_user_handler({
-                    "question": "Approve?",
-                    "choices": ["Yes", "No"],
-                })
+        with patch("marneo.tools.core.ask_user.create_card_entity", new_callable=AsyncMock) as mock_create:
+            mock_create.return_value = "card_123"
+            with patch("marneo.tools.core.ask_user.send_card_by_card_id", new_callable=AsyncMock) as mock_send:
+                mock_send.return_value = True
+                result = await ask_user_handler({"questions": [
+                    {"question": "Approve?", "header": "Confirm", "options": [
+                        {"label": "Yes", "description": "Approve"}, {"label": "No", "description": "Reject"}
+                    ], "multiSelect": False}
+                ]})
                 parsed = json.loads(result)
-                assert parsed["answer"] == "approved"
-                assert parsed["question_id"] == "mq_ok"
+                assert parsed["status"] == "pending"
+                assert "questionId" in parsed or "question_id" in parsed
     finally:
         ask_user_ctx.reset(token)

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0] - 2026-04-28
+
+### Changed (BREAKING)
+- **ask_user complete rewrite — faithful port of openclaw-lark ask-user-question.js (860 LOC)**
+  - **Non-blocking**: tool returns `{status: 'pending', questionId}` immediately, does NOT block agentic loop
+  - **Synthetic message injection**: user answers arrive as a new ChannelMessage in a NEW conversation turn (not via Future)
+  - **4 card states**: 待回答 (blue) → 处理中 (turquoise) → 已完成 (green) → 已过期 (grey), updated via Card Kit PATCH API
+  - **Form container**: all questions in `<form>` tag, submit button with `form_action_type: "submit"`, form_value one-shot callback
+  - **Multi-strategy submit detection**: button name prefix, tag+formValue, form_submit tag (matches all SDK versions)
+  - **Sender verification**: only the original user can answer
+  - **TTL expiry**: auto-expire after 5 min, card updates to expired state
+  - **Retry logic**: synthetic message injection retries up to 2x with 2s delay, reverts card to submittable on failure
+  - **Chat-scoped fallback**: when operationId missing, lookup by account:chat secondary index
+  - **Full i18n**: zh_cn + en_us on all card elements
+- **PendingQuestionStore replaced** with openclaw registry pattern: store/consume/findByChat, TTL timer, submitted flag, cardSequence tracking
+
 ## [0.1.9] - 2026-04-28
 
 ### Changed

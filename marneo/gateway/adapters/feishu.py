@@ -984,104 +984,325 @@ class FeishuChannelAdapter(BaseChannelAdapter):
     # -------------------------------------------------------------------------
 
     def _on_card_action(self, data: Any) -> Any:
-        """Route card actions — resolve ask_user form submissions or dispatch as synthetic text."""
+        """Handle card actions — faithful port of openclaw handleAskUserAction().
+
+        Unified form submit handling:
+        1. Extract action/operationId from button name or value
+        2. Look up pending question (primary by questionId, fallback by chat)
+        3. Parse form_value → answers
+        4. Validate all questions answered
+        5. Mark submitted, return processing card + toast immediately
+        6. Background: inject synthetic message → update card to answered
+        """
         try:
             from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
-            action = getattr(data, "action", None) or {}
-            value = getattr(action, "value", {}) or {}
-            form_value = getattr(action, "form_value", None) or {}
-            action_name = getattr(action, "name", "") or ""
-            action_tag = getattr(action, "tag", "") or ""
+
+            from marneo.gateway.pending_questions import (
+                ACTION_SUBMIT,
+                SUBMIT_BUTTON_PREFIX,
+                get_pending_question,
+                find_question_by_chat,
+                read_form_text_field,
+                read_form_multi_select,
+                get_input_field_name,
+                get_select_field_name,
+            )
+
+            # ── Extract event fields ──────────────────────────────────────────
+            action_obj = getattr(data, "action", None) or {}
             operator = getattr(data, "operator", None)
-            user_id = getattr(operator, "open_id", "") if operator else ""
-            chat_id = getattr(data, "open_chat_id", "") or ""
+            sender_open_id = getattr(operator, "open_id", "") if operator else ""
+
+            # open_chat_id may be at top level or inside context (form submit uses context)
+            open_chat_id = (
+                getattr(data, "open_chat_id", "")
+                or getattr(getattr(data, "context", None), "open_chat_id", "")
+                or ""
+            )
             msg_id = getattr(data, "open_message_id", "") or ""
 
-            # ── ask_user form submit (openclaw pattern) ────────────────────────
-            # Detect form submit by button name prefix or tag
-            is_form_submit = False
-            question_id = ""
+            # SDK may use attributes or dict for action fields
+            action_tag = getattr(action_obj, "tag", "") or (action_obj.get("tag", "") if isinstance(action_obj, dict) else "")
+            action_name = getattr(action_obj, "name", "") or (action_obj.get("name", "") if isinstance(action_obj, dict) else "")
+            value = getattr(action_obj, "value", None) or (action_obj.get("value") if isinstance(action_obj, dict) else {}) or {}
 
-            if action_name.startswith("ask_user_submit_"):
-                is_form_submit = True
-                question_id = action_name[len("ask_user_submit_"):]
-            elif action_tag in ("button", "form_submit") and form_value:
-                is_form_submit = True
-            # Legacy button-based resolution
-            elif isinstance(value, dict) and value.get("marneo_question_id"):
-                question_id = value["marneo_question_id"]
-                answer = value.get("answer", "")
-                from marneo.gateway.pending_questions import pending_question_store
-                resolved = pending_question_store.resolve(question_id, answer)
-                if resolved:
-                    log.info("[Feishu] Card button resolved question %s: %s",
-                             question_id, answer[:60])
-                    return P2CardActionTriggerResponse()
+            # form_value: try multiple locations (SDK versions differ)
+            form_value = (
+                getattr(action_obj, "form_value", None)
+                or (action_obj.get("form_value") if isinstance(action_obj, dict) else None)
+                or (value.get("form_value") if isinstance(value, dict) else None)
+            )
 
-            if is_form_submit:
-                from marneo.gateway.pending_questions import pending_question_store
+            log.info(
+                "[Feishu] Card action: tag=%s name=%s chat=%s sender=%s hasForm=%s hasValue=%s",
+                action_tag,
+                action_name[:40] if action_name else "",
+                open_chat_id[:12] if open_chat_id else "?",
+                sender_open_id[:12] if sender_open_id else "?",
+                bool(form_value),
+                bool(value),
+            )
 
-                # Look up question by ID or chat-scoped fallback
-                if not question_id:
-                    # Try to find from form_value or value
-                    if isinstance(value, dict):
-                        question_id = value.get("operation_id", "")
+            # ── Detect submit action (matches openclaw detection logic) ───────
+            action_type = ""
+            operation_id = ""
 
-                questions = pending_question_store.get_questions(question_id) if question_id else []
+            # Extract from button value (may not propagate for form submit)
+            if isinstance(value, dict):
+                action_type = value.get("action", "")
+                operation_id = value.get("operation_id", "")
 
-                if not questions and not form_value:
-                    return P2CardActionTriggerResponse()
+            # Detect form submit by button name
+            if not action_type and action_name and action_name.startswith(SUBMIT_BUTTON_PREFIX):
+                action_type = ACTION_SUBMIT
+                if not operation_id:
+                    operation_id = action_name[len(SUBMIT_BUTTON_PREFIX):]
 
-                # Parse form_value → answers
-                answers = {}
-                for i, q in enumerate(questions):
-                    opts = q.get("options", [])
-                    if not opts:
-                        # Free-text input
-                        val = form_value.get(f"answer_{i}", "")
-                        if isinstance(val, str) and val.strip():
-                            answers[q.get("question", "")] = val.strip()
-                    elif q.get("multiSelect"):
-                        val = form_value.get(f"selection_{i}", [])
-                        if isinstance(val, list) and val:
-                            answers[q.get("question", "")] = ", ".join(str(v) for v in val)
-                        elif isinstance(val, str) and val.strip():
-                            answers[q.get("question", "")] = val.strip()
-                    else:
-                        val = form_value.get(f"selection_{i}", "")
-                        if isinstance(val, str) and val.strip():
-                            answers[q.get("question", "")] = val.strip()
+            # Detect form submit by tag + formValue
+            if not action_type and action_tag == "button" and form_value:
+                action_type = ACTION_SUBMIT
 
-                # Format answers as readable text
-                if answers:
-                    answer_lines = "\n".join(f"- {q}: {a}" for q, a in answers.items())
-                    answer_text = f"用户回答了你的问题:\n{answer_lines}"
+            # Some SDK versions emit tag='form_submit'
+            if not action_type and action_tag == "form_submit":
+                action_type = ACTION_SUBMIT
+                if not form_value and isinstance(action_obj, dict):
+                    form_value = action_obj
+
+            if action_type != ACTION_SUBMIT:
+                # Not an ask_user submit — dispatch as generic card action (existing behavior)
+                cmd = value.get("command", str(value)) if isinstance(value, dict) else str(value)
+                if cmd and self._loop and self._loop_accepts_callbacks(self._loop):
+                    channel_msg = ChannelMessage(
+                        platform=self.platform,
+                        chat_id=open_chat_id,
+                        chat_type="dm",
+                        user_id=sender_open_id,
+                        text=cmd,
+                        msg_id=msg_id,
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self._manager.dispatch(channel_msg), self._loop
+                    )
+                return P2CardActionTriggerResponse()
+
+            # ── Look up pending question ──────────────────────────────────────
+            ctx = None
+            if operation_id:
+                ctx = get_pending_question(operation_id)
+
+            if ctx is None and open_chat_id:
+                # Targeted fallback: exact account:chat match via secondary index
+                ctx = find_question_by_chat(self._app_id, open_chat_id)
+                if ctx:
+                    log.info("[Feishu] Resolved question via chat-scoped fallback: %s", ctx.question_id)
+
+            if ctx is None:
+                if operation_id:
+                    log.warning("[Feishu] ask-user: question %s not found (expired or already handled)", operation_id)
+                return P2CardActionTriggerResponse()
+
+            if ctx.submitted:
+                return P2CardActionTriggerResponse()
+
+            # Verify sender (only the original user can answer)
+            if sender_open_id and ctx.sender_open_id and sender_open_id != ctx.sender_open_id:
+                return P2CardActionTriggerResponse()
+
+            if not form_value:
+                log.warning("[Feishu] ask-user submit without form_value for question %s", operation_id)
+                return P2CardActionTriggerResponse()
+
+            log.info("[Feishu] form_value: %s", json.dumps(form_value, ensure_ascii=False)[:500])
+
+            # ── Parse form_value → answers ────────────────────────────────────
+            answers: dict[str, str] = {}
+            unanswered: list[str] = []
+
+            for i, q in enumerate(ctx.questions):
+                options = q.get("options", [])
+                multi_select = q.get("multiSelect", False)
+                answer: Optional[str] = None
+
+                if not options:
+                    # Free-text input
+                    answer = read_form_text_field(form_value, get_input_field_name(i))
+                elif multi_select:
+                    # Multi-select
+                    selected = read_form_multi_select(form_value, get_select_field_name(i))
+                    if selected:
+                        answer = ", ".join(selected)
                 else:
-                    answer_text = str(form_value)
+                    # Single-select
+                    answer = read_form_text_field(form_value, get_select_field_name(i))
 
-                resolved = pending_question_store.resolve(question_id, answer_text)
-                if resolved:
-                    log.info("[Feishu] Form submit resolved question %s", question_id)
-                    return P2CardActionTriggerResponse()
+                if answer:
+                    answers[q.get("question", "")] = answer
+                else:
+                    unanswered.append(q.get("header", f"问题 {i+1}"))
 
-            # ── Existing behavior: dispatch as synthetic text ────────────────
-            cmd = value.get("command", str(value)) if isinstance(value, dict) else str(value)
-            if cmd and self._loop and self._loop_accepts_callbacks(self._loop):
-                channel_msg = ChannelMessage(
-                    platform=self.platform,
-                    chat_id=chat_id,
-                    chat_type="dm",
-                    user_id=user_id,
-                    text=cmd,
-                    msg_id=msg_id,
-                )
+            if unanswered:
+                # Some questions not answered — return toast warning
+                return P2CardActionTriggerResponse()
+
+            # ── Mark as submitted (guard against double-submit & TTL expiry) ──
+            ctx.submitted = True
+
+            # ── Build processing card for immediate visual feedback ───────────
+            from marneo.tools.core.ask_user import build_processing_card
+            processing_card = build_processing_card(ctx.questions, answers)
+
+            # ── Background: inject synthetic message ──────────────────────────
+            # Schedule injection on the adapter's event loop (fire-and-forget)
+            loop = self._loop
+            if loop and self._loop_accepts_callbacks(loop):
                 asyncio.run_coroutine_threadsafe(
-                    self._manager.dispatch(channel_msg), self._loop
+                    self._inject_answer_synthetic_message(ctx, answers),
+                    loop,
                 )
-            return P2CardActionTriggerResponse()
+
+            log.info("[Feishu] question %s submitted, synthetic message will be injected", ctx.question_id)
+
+            # ── Return immediate visual feedback via Feishu callback response ─
+            # Card Kit v2 callback response format:
+            # - toast: ephemeral success message
+            # - card: replaces card content immediately for the clicking user
+            # Note: callback-return card does NOT consume a cardSequence number.
+            return {
+                "toast": {
+                    "type": "success",
+                    "content": "已收到回答，正在处理...",
+                },
+                "card": {
+                    "type": "raw",
+                    "data": processing_card,
+                },
+            }
+
         except Exception as exc:
-            log.warning("[Feishu] Card action handler error: %s", exc)
+            log.warning("[Feishu] Card action handler error: %s", exc, exc_info=True)
             return None
+
+    # -------------------------------------------------------------------------
+    # Synthetic message injection (ported from openclaw injectAnswerSyntheticMessage)
+    # -------------------------------------------------------------------------
+
+    async def _inject_answer_synthetic_message(
+        self,
+        ctx: Any,  # PendingQuestionContext
+        answers: dict[str, str],
+    ) -> None:
+        """Inject a synthetic ChannelMessage carrying the user's answers.
+
+        Faithfully ports openclaw's injectAnswerSyntheticMessage():
+        1. Update card to processing state via API (all viewers see it)
+        2. Build synthetic ChannelMessage with answers
+        3. Dispatch via self._manager.dispatch() (starts new AI turn)
+        4. On success: update card to answered state
+        5. On failure (all retries): revert card to submittable form, reset submitted flag
+        """
+        from marneo.gateway.pending_questions import (
+            consume_pending_question,
+            arm_ttl_timer,
+            PENDING_QUESTION_TTL_S,
+            INJECT_MAX_RETRIES,
+            INJECT_RETRY_DELAY_S,
+        )
+        from marneo.tools.core.ask_user import (
+            build_processing_card,
+            build_answered_card,
+            build_ask_user_card,
+            update_card,
+        )
+
+        # ── 1. Update card to processing state via API (all viewers) ──────
+        try:
+            processing_card = build_processing_card(ctx.questions, answers)
+            ctx.card_sequence += 1
+            await update_card(self, ctx.card_id, processing_card, ctx.card_sequence)
+        except Exception as exc:
+            log.warning("[Feishu] Failed to update card to processing state: %s", exc)
+            # Non-fatal: clicking user already sees processing via callback return
+
+        # ── 2. Build synthetic message ────────────────────────────────────
+        answer_lines = "\n".join(f"- {q}: {a}" for q, a in answers.items())
+        synthetic_text = f"用户回答了你的问题:\n{answer_lines}"
+
+        synthetic_msg_id = f"{ctx.message_id}:ask-user-answer:{ctx.question_id}"
+
+        # Add session context prefix (matches _handle_message_event_data format)
+        import datetime as _dt
+        now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        chat_label = "Feishu group" if ctx.chat_type == "group" else "Feishu DM"
+        sender_name = await self._resolve_sender_name(ctx.sender_open_id) if ctx.sender_open_id else ""
+        name_part = f"{sender_name} " if sender_name else ""
+        context_prefix = (
+            f"[{now}] {chat_label} | "
+            f"{name_part}(open_id={ctx.sender_open_id}) "
+            f"[msg:{synthetic_msg_id}] [chat:{ctx.chat_id}]"
+        )
+        display_text = f"{context_prefix}\n{synthetic_text}"
+
+        channel_msg = ChannelMessage(
+            platform=self.platform,
+            chat_id=ctx.chat_id,
+            chat_type="group" if ctx.chat_type == "group" else "dm",
+            user_id=ctx.sender_open_id,
+            user_name=sender_name,
+            text=display_text,
+            msg_id=synthetic_msg_id,
+        )
+
+        # ── 3. Dispatch with retries ──────────────────────────────────────
+        last_error: Optional[Exception] = None
+        for attempt in range(INJECT_MAX_RETRIES + 1):
+            if attempt > 0:
+                log.info(
+                    "[Feishu] Retrying synthetic message injection (attempt %d) for %s",
+                    attempt + 1, ctx.question_id,
+                )
+                await asyncio.sleep(INJECT_RETRY_DELAY_S)
+
+            try:
+                await self._manager.dispatch(channel_msg)
+
+                # Success — consume pending question and update card
+                consume_pending_question(ctx.question_id)
+                log.info("[Feishu] Synthetic answer message dispatched for question %s", ctx.question_id)
+
+                # Update card to answered state
+                try:
+                    answered_card = build_answered_card(ctx.questions, answers)
+                    ctx.card_sequence += 1
+                    await update_card(self, ctx.card_id, answered_card, ctx.card_sequence)
+                except Exception as exc:
+                    log.warning("[Feishu] Failed to update card to answered state: %s", exc)
+
+                return  # success
+
+            except Exception as exc:
+                last_error = exc
+                log.warning(
+                    "[Feishu] Synthetic message injection attempt %d failed: %s",
+                    attempt + 1, exc,
+                )
+
+        # ── All retries exhausted ─────────────────────────────────────────
+        # Reset submitted flag so user can retry via card
+        ctx.submitted = False
+        arm_ttl_timer(ctx, PENDING_QUESTION_TTL_S)
+        log.error(
+            "[Feishu] Synthetic message injection failed after %d attempts for %s: %s",
+            INJECT_MAX_RETRIES + 1, ctx.question_id, last_error,
+        )
+
+        # Revert card from "processing" back to interactive form
+        try:
+            submittable_card = build_ask_user_card(ctx.questions, ctx.question_id)
+            ctx.card_sequence += 1
+            await update_card(self, ctx.card_id, submittable_card, ctx.card_sequence)
+            log.info("[Feishu] Reverted card to submittable state for question %s", ctx.question_id)
+        except Exception as exc:
+            log.warning("[Feishu] Failed to revert card to submittable state: %s", exc)
 
     # -------------------------------------------------------------------------
     # Streaming card dispatch (Task 2)
@@ -1097,23 +1318,17 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
         Falls back to text send_reply if Card Kit card creation fails.
         """
-        # Set ask_user context so the tool can send cards to this chat
+        # Set ask_user context so the tool can send cards to this chat.
+        # Non-blocking pattern: tool returns immediately after sending the card,
+        # answers arrive via synthetic message injection in a new turn.
         from marneo.tools.core.ask_user import ask_user_ctx, AskUserContext
-        ctx_token = ask_user_ctx.set(AskUserContext(chat_id=msg.chat_id, adapter=self))
-
-        # Check for pending text-reply questions before normal processing
-        from marneo.gateway.pending_questions import pending_question_store
-        if pending_question_store.has_pending_for_chat(msg.chat_id):
-            # Strip the context prefix to get raw user text
-            raw_text = msg.text
-            # The context prefix ends with a newline before the user text
-            if "\n" in raw_text:
-                raw_text = raw_text.split("\n", 1)[-1].strip()
-            resolved = pending_question_store.resolve_by_chat_text(msg.chat_id, raw_text)
-            if resolved:
-                log.info("[msg:%s] Resolved pending text-reply question", msg.msg_id[:12] if msg.msg_id else "?")
-                ask_user_ctx.reset(ctx_token)
-                return
+        ctx_token = ask_user_ctx.set(AskUserContext(
+            chat_id=msg.chat_id,
+            adapter=self,
+            sender_open_id=msg.user_id,
+            msg_id=msg.msg_id,
+            chat_type="group" if msg.chat_type == "group" else "p2p",
+        ))
 
         try:
             log.info("[msg:%s] Streaming started", msg.msg_id[:12] if msg.msg_id else "?")

@@ -1,183 +1,103 @@
 # tests/gateway/test_pending_questions.py
-"""Tests for PendingQuestionStore — async Future coordination layer."""
-import asyncio
-import time
-from unittest.mock import patch
-
-import pytest
-
-from marneo.gateway.pending_questions import PendingQuestionStore
-
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def store() -> PendingQuestionStore:
-    """Fresh store per test (not the module singleton)."""
-    return PendingQuestionStore()
-
-
-# ── test_create_returns_id_and_future ───────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_create_returns_id_and_future(store: PendingQuestionStore):
-    """create() must return a (str, Future) tuple with an mq_ prefixed id."""
-    loop = asyncio.get_running_loop()
-    question_id, future = store.create(
-        chat_id="chat_abc",
-        question="Pick a colour?",
-        choices=["red", "blue"],
-        loop=loop,
-    )
-    assert isinstance(question_id, str)
-    assert question_id.startswith("mq_")
-    assert isinstance(future, asyncio.Future)
-    assert not future.done()
+"""Tests for pending question registry (openclaw non-blocking pattern)."""
+from marneo.gateway.pending_questions import (
+    PendingQuestionContext,
+    store_pending_question,
+    consume_pending_question,
+    get_pending_question,
+    find_question_by_chat,
+    read_form_text_field,
+    read_form_multi_select,
+    get_input_field_name,
+    get_select_field_name,
+    _pending_questions,
+    _by_chat_context,
+    _lock,
+)
 
 
-# ── test_resolve_completes_future ───────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_resolve_completes_future(store: PendingQuestionStore):
-    """resolve() sets the Future result so awaiting it yields the answer."""
-    loop = asyncio.get_running_loop()
-    qid, future = store.create(
-        chat_id="chat_abc",
-        question="Continue?",
-        choices=["yes", "no"],
-        loop=loop,
-    )
-    resolved = store.resolve(qid, "yes")
-    assert resolved is True
-
-    # Allow call_soon_threadsafe callback to execute
-    await asyncio.sleep(0)
-    assert future.done()
-    assert future.result() == "yes"
+def _clear():
+    with _lock:
+        _pending_questions.clear()
+        _by_chat_context.clear()
 
 
-# ── test_resolve_unknown_returns_false ──────────────────────────────────────
-
-def test_resolve_unknown_returns_false(store: PendingQuestionStore):
-    """resolve() with a non-existent question_id must return False."""
-    assert store.resolve("mq_does_not_exist", "answer") is False
-
-
-# ── test_resolve_twice_returns_false ────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_resolve_twice_returns_false(store: PendingQuestionStore):
-    """Second resolve for the same question_id returns False (already popped)."""
-    loop = asyncio.get_running_loop()
-    qid, future = store.create(
-        chat_id="chat_abc",
-        question="Pick one?",
-        choices=["A", "B"],
-        loop=loop,
-    )
-    assert store.resolve(qid, "A") is True
-    # Second resolve — question already removed from store
-    assert store.resolve(qid, "B") is False
-
-
-# ── test_cancel_expired ─────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_cancel_expired(store: PendingQuestionStore):
-    """cancel_expired returns count of expired questions and resolves them."""
-    loop = asyncio.get_running_loop()
-    qid, future = store.create(
-        chat_id="chat_abc",
-        question="Timeout question?",
-        choices=[],
-        loop=loop,
+def _make_ctx(qid="q1", chat_id="chat1", account_id="app1", **kw):
+    return PendingQuestionContext(
+        question_id=qid, chat_id=chat_id, account_id=account_id,
+        sender_open_id=kw.get("sender", "ou_test"),
+        card_id=kw.get("card_id", "card1"),
+        questions=kw.get("questions", [{"question": "test?", "header": "Test", "options": [], "multiSelect": False}]),
+        message_id=kw.get("msg_id", "msg1"),
     )
 
-    # Artificially age the question by setting created_at in the past
-    with store._lock:
-        pq = store._pending[qid]
-        pq.created_at = time.monotonic() - 600  # 10 minutes ago
 
-    cancelled = store.cancel_expired(timeout=300)
-    assert cancelled == 1
+class TestStoreAndConsume:
+    def setup_method(self):
+        _clear()
 
-    # Future should be resolved with the timeout message
-    await asyncio.sleep(0)
-    assert future.done()
-    assert future.result() == "用户未回复（超时）"
+    def test_store_and_get(self):
+        ctx = _make_ctx()
+        store_pending_question(ctx)
+        assert get_pending_question("q1") is ctx
 
+    def test_consume_returns_ctx(self):
+        store_pending_question(_make_ctx())
+        assert consume_pending_question("q1") is not None
+        assert get_pending_question("q1") is None
 
-# ── test_cancel_expired_skips_fresh ─────────────────────────────────────────
+    def test_consume_nonexistent(self):
+        assert consume_pending_question("nope") is None
 
-@pytest.mark.asyncio
-async def test_cancel_expired_skips_fresh(store: PendingQuestionStore):
-    """cancel_expired must not touch questions still within timeout."""
-    loop = asyncio.get_running_loop()
-    _, future = store.create(
-        chat_id="chat_abc",
-        question="Fresh question?",
-        choices=[],
-        loop=loop,
-    )
-    cancelled = store.cancel_expired(timeout=300)
-    assert cancelled == 0
-    assert not future.done()
+    def test_double_consume(self):
+        store_pending_question(_make_ctx())
+        consume_pending_question("q1")
+        assert consume_pending_question("q1") is None
 
 
-# ── test_resolve_by_chat_text ───────────────────────────────────────────────
+class TestFindByChat:
+    def setup_method(self):
+        _clear()
 
-@pytest.mark.asyncio
-async def test_resolve_by_chat_text(store: PendingQuestionStore):
-    """resolve_by_chat_text resolves the oldest text-reply question for a chat."""
-    loop = asyncio.get_running_loop()
-    qid1, future1 = store.create(
-        chat_id="chat_xyz",
-        question="First question (text)?",
-        choices=[],  # text reply
-        loop=loop,
-    )
-    qid2, future2 = store.create(
-        chat_id="chat_xyz",
-        question="Second question (text)?",
-        choices=[],  # text reply
-        loop=loop,
-    )
+    def test_find_single(self):
+        ctx = _make_ctx()
+        store_pending_question(ctx)
+        assert find_question_by_chat("app1", "chat1") is ctx
 
-    resolved = store.resolve_by_chat_text("chat_xyz", "my answer")
-    assert resolved is True
+    def test_find_none(self):
+        assert find_question_by_chat("app1", "chat1") is None
 
-    await asyncio.sleep(0)
-    # Should resolve the first (oldest) question
-    assert future1.done()
-    assert future1.result() == "my answer"
-    # Second still pending
-    assert not future2.done()
+    def test_ambiguous_returns_none(self):
+        store_pending_question(_make_ctx(qid="q1"))
+        store_pending_question(_make_ctx(qid="q2"))
+        assert find_question_by_chat("app1", "chat1") is None
+
+    def test_skips_submitted(self):
+        ctx = _make_ctx()
+        ctx.submitted = True
+        store_pending_question(ctx)
+        assert find_question_by_chat("app1", "chat1") is None
 
 
-# ── test_resolve_by_chat_text_ignores_choice_questions ──────────────────────
+class TestFormValueParsers:
+    def test_read_text_field(self):
+        assert read_form_text_field({"answer_0": "hello"}, "answer_0") == "hello"
 
-@pytest.mark.asyncio
-async def test_resolve_by_chat_text_ignores_choice_questions(store: PendingQuestionStore):
-    """resolve_by_chat_text must skip questions that have choices (button-based)."""
-    loop = asyncio.get_running_loop()
-    _, future_btn = store.create(
-        chat_id="chat_xyz",
-        question="Button Q?",
-        choices=["A", "B"],
-        loop=loop,
-    )
-    resolved = store.resolve_by_chat_text("chat_xyz", "typed text")
-    assert resolved is False
-    assert not future_btn.done()
+    def test_read_text_empty(self):
+        assert read_form_text_field({"answer_0": ""}, "answer_0") is None
 
+    def test_read_text_missing(self):
+        assert read_form_text_field({}, "answer_0") is None
 
-# ── test_has_pending_for_chat ───────────────────────────────────────────────
+    def test_read_multi_select_list(self):
+        assert read_form_multi_select({"s": ["a", "b"]}, "s") == ["a", "b"]
 
-@pytest.mark.asyncio
-async def test_has_pending_for_chat(store: PendingQuestionStore):
-    """has_pending_for_chat returns True only for chats with text-reply Qs."""
-    loop = asyncio.get_running_loop()
-    store.create(chat_id="chat_a", question="Q?", choices=[], loop=loop)
+    def test_read_multi_select_string(self):
+        assert read_form_multi_select({"s": "a"}, "s") == ["a"]
 
-    assert store.has_pending_for_chat("chat_a") is True
-    assert store.has_pending_for_chat("chat_b") is False
+    def test_read_multi_select_empty(self):
+        assert read_form_multi_select({}, "s") == []
+
+    def test_field_names(self):
+        assert get_input_field_name(0) == "answer_0"
+        assert get_select_field_name(2) == "selection_2"
