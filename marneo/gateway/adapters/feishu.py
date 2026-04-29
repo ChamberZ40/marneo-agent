@@ -141,41 +141,7 @@ def _run_feishu_ws_client(app_id: str, app_secret: str, domain: Any,
         domain=domain,
         auto_reconnect=True,
     )
-
-    # ── Patch CARD routing (openclaw lark-client.js line 344 pattern) ────
-    # SDK _handle_data_frame silently drops MessageType.CARD:
-    #   elif message_type == MessageType.CARD: return
-    # Fix: route CARD through event_handler, same as EVENT. EVENT untouched.
-    _orig_hdf = ws_client._handle_data_frame
-    async def _patched_hdf(frame: Any) -> None:
-        import http as _h
-        import base64 as _b
-        try:
-            type_val = None
-            for h in frame.headers:
-                if h.key == "type":
-                    type_val = h.value
-                    break
-            if type_val == "card":
-                log.info("[Feishu] CARD frame → routing to event handler")
-                from lark_oapi.ws.model import Response
-                from lark_oapi.core import JSON as _J
-                resp = Response(code=_h.HTTPStatus.OK)
-                try:
-                    result = ws_client._event_handler.do_without_validation(frame.payload)
-                    if result is not None:
-                        resp.data = _b.b64encode(_J.marshal(result).encode("utf-8"))
-                except Exception as e:
-                    log.error("[Feishu] CARD handler error: %s", e)
-                    resp = Response(code=_h.HTTPStatus.INTERNAL_SERVER_ERROR)
-                frame.payload = _J.marshal(resp).encode("utf-8")
-                await ws_client._write_message(frame.SerializeToString())
-                return
-        except Exception:
-            pass
-        return await _orig_hdf(frame)
-    ws_client._handle_data_frame = _patched_hdf
-
+    # Pass the client back to the adapter for disconnect
     on_ready(ws_client)
 
     try:
@@ -1021,15 +987,6 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         """Route card button clicks — resolve ask_user questions or dispatch as synthetic text."""
         try:
             from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
-
-            # DEBUG: dump entire data structure to understand SDK parsing
-            try:
-                import json as _j
-                raw_attrs = {a: repr(getattr(data, a, "N/A"))[:200] for a in dir(data) if not a.startswith('_')}
-                log.info("[Feishu] Card action DUMP: %s", _j.dumps(raw_attrs, ensure_ascii=False, default=str)[:2000])
-            except Exception as e:
-                log.info("[Feishu] Card action DUMP error: %s", e)
-
             action = getattr(data, "action", None) or {}
             value = getattr(action, "value", {}) or {}
             operator = getattr(data, "operator", None)
