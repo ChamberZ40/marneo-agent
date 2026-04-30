@@ -2,647 +2,510 @@
 
 <div align="center">
 
-> **Mare**（马）+ **Neo**（新）= **新马** 🐴
->
-> *Work-focused digital employees — not a personal assistant*
+**Feishu-first digital employees for real work.**
+
+Marneo turns AI agents into named, project-aware digital employees that can live inside Feishu/Lark, use tools, remember work context, and collaborate as a team.
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://python.org)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
 
-[🇨🇳 中文文档](#中文文档) · [🇺🇸 English](#english-documentation)
+[中文](#中文说明) · [English](#english)
 
 </div>
 
 ---
 
-## 中文文档
+## 中文说明
 
-### 设计理念
+### Marneo 是什么
 
-Marneo 是**专注工作的数字员工系统**，不是个人助理。
+Marneo 是一个「数字员工」系统，不是普通聊天机器人，也不是只会回答问题的个人助理。
 
-**与 OpenClaw / Hermes 的核心区别：**
+它的核心目标是：
 
-| 维度 | OpenClaw / Hermes | Marneo |
-|------|-------------------|--------|
-| 定位 | 个人助理，记住一切 | 数字员工，专注执行 |
-| System Prompt | 随使用积累无限增长（OpenClaw ~40KB） | 固定上限（默认 ≤4,500 chars） |
-| 技能/记忆 | 全部预加载进 context | 按需检索注入，用完即清 |
-| 响应速度 | 越用越慢 | 稳定，不随时间退化 |
-| 记忆设计 | 无分级，堆积 | 三层分级：Core / Episodic / Working |
+- 给每个 AI 员工一个独立身份、能力边界和成长轨迹
+- 把员工绑定到项目，而不是把所有上下文无限塞进一个超级 prompt
+- 让员工通过飞书机器人在线工作，能读消息、回消息、处理文件、调用工具
+- 支持多个飞书机器人，每个机器人对应不同员工和不同 channel
+- 保持 system prompt 可控，避免越用越慢、越用越贵
 
-**核心理念：**
-- 🧑‍💼 **员工中心**：有名字、性格、成长轨迹的数字员工，不是通用助手
-- 📁 **项目绑定**：员工被分配到具体项目，携带最小必要上下文
-- 🧠 **分层记忆**：核心约束永不遗忘，工作经验按需召回
-- 🛠️ **工具能力**：文件读写、Shell、Web、飞书全套工具
-- 📱 **多渠道在线**：飞书/微信/Telegram/Discord 随时响应
-- 🤝 **团队协作**：多员工并行，协调者汇总结果
+Marneo 当前的产品重点是：先把 Feishu/Lark 这一个 channel 深耕打通。
+
+### 和 Hermes / OpenClaw 的区别
+
+| 维度 | Hermes / OpenClaw 风格 | Marneo |
+|---|---|---|
+| 产品定位 | 个人助理，偏全能 | 工作型数字员工，偏执行 |
+| 上下文策略 | 容易把技能/记忆长期塞进 system prompt | 固定预算 + 按需检索 |
+| 员工模型 | 一个主 agent 或多 agent 配置 | 每个员工有独立 profile / SOUL / Feishu Bot |
+| 飞书接入 | 通常是一个机器人入口 | per-employee Bot，channel 为 `feishu:<employee>` |
+| 工作组织 | 对话为中心 | 项目、员工、团队、报告为中心 |
+| 当前优先级 | 多 channel 泛化 | Feishu-first 深度打磨 |
+
+### 核心能力
+
+- Feishu/Lark WebSocket 网关
+  - 普通文本消息
+  - Markdown / rich text 回复
+  - 图片、文件等附件下载
+  - Reaction 生命周期：收到、处理中、失败提示
+  - ask_user 交互卡片提交回调
+  - watchdog 自动恢复
+
+- 多飞书机器人 / 多员工 channel
+  - 每个员工单独保存飞书配置
+  - 配置文件：`~/.marneo/employees/<employee>/feishu.yaml`
+  - 网关 channel：`feishu:<employee>`
+  - 例如：`feishu:laoqi`、`feishu:aria`
+
+- 数字员工体系
+  - `marneo hire` 创建员工
+  - 员工拥有 `SOUL.md`、等级、成长记录、报告
+  - 员工可绑定项目、学习技能、生成日报/周报
+
+- 工具调用能力
+  - bash
+  - read_file / write_file / edit_file
+  - glob / grep
+  - web_fetch / web_search
+  - lark_cli，封装飞书开放能力
+
+- 项目与团队协作
+  - 创建项目
+  - 分配员工
+  - 多员工团队协作
+  - 协调者拆分任务并汇总结果
 
 ---
 
-### 快速开始
+## 快速开始
+
+### 1. 安装
 
 ```bash
-# 安装
-pip install -e .
+git clone git@github.com:ChamberZ40/marneo-agent.git
+cd marneo-agent
+python3 -m pip install -e .
+```
 
-# 1. 配置 LLM Provider
+开发环境：
+
+```bash
+python3 -m pip install -e '.[dev]'
+```
+
+### 2. 配置 LLM Provider
+
+```bash
 marneo setup
+```
 
-# 2. 招聘第一位数字员工（AI 面试生成身份档案）
+`marneo setup` 会引导你配置 OpenAI-compatible 或 Anthropic-compatible Provider。
+
+如果 Provider 已经配置过，它不会再强迫你重新配置；你可以直接选择：
+
+```text
+跳过 Provider，继续新增/配置飞书机器人
+```
+
+这对于新增第二个、第三个飞书机器人很重要。
+
+### 3. 创建第一个数字员工
+
+```bash
 marneo hire
-
-# 3. 开始对话
-marneo work
 ```
 
----
+员工数据会保存在：
 
-### 系统架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        用户 / IM 渠道                         │
-│              飞书 · 微信 · Telegram · Discord                 │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ 消息
-┌──────────────────────────▼──────────────────────────────────┐
-│                     Gateway 层                               │
-│  FeishuAdapter · WeChatAdapter · TelegramAdapter             │
-│  - WebSocket 长连接 / Webhook                                │
-│  - 消息解析（text/image/file/post）                          │
-│  - 附件下载（多模态：图片/PDF → bytes）                       │
-│  - Reaction 生命周期（收到→处理中→完成/失败）                 │
-│  - 飞书 Markdown 渲染（post type + md tag）                   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ ChannelMessage（text + attachments）
-┌──────────────────────────▼──────────────────────────────────┐
-│                   GatewayManager                             │
-│  - 消息去重（disk-persistent，24h TTL）                      │
-│  - 按 chat_id 串行锁（openclaw createChatQueue 模式）        │
-│  - 分发到 ChatSession                                        │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                  Engine 层（ChatSession）                     │
-│                                                              │
-│  send_with_tools()  ←── Agentic Loop                        │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │  LLM 调用 → tool_call? → 执行工具 → 注入结果 → 循环  │    │
-│  │  直到 LLM 返回纯文本为止（最多 max_iterations 轮）    │    │
-│  └─────────────────────────────────────────────────────┘    │
-│                                                              │
-│  多模态 content blocks 构建：                                │
-│  - OpenAI 协议：image_url block / text block                │
-│  - Anthropic 协议：image source / document block            │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                   Tools 层                                   │
-│                                                              │
-│  Tool Registry（hermes-agent 模式）                          │
-│  - 自注册：每个工具模块 import 时自动注册                     │
-│  - check_fn：工具不可用时自动从 LLM 工具列表排除             │
-│  - 描述极简：每个工具 ≤ 2 行描述，不预加载使用文档           │
-│                                                              │
-│  核心工具：                                                  │
-│  bash · read_file · write_file · edit_file · glob · grep    │
-│  web_fetch · web_search · lark_cli                          │
-│                                                              │
-│  lark_cli：封装官方 lark-cli，自动注入 app_id/app_secret     │
-│  覆盖：文档/日历/多维表/任务/日程/群聊/日历/审批等 200+ 命令  │
-└──────────────────────────────────────────────────────────────┘
+```text
+~/.marneo/employees/<employee>/
 ```
 
----
+### 4. 为员工配置飞书机器人
 
-### 模块详解
+推荐的新入口：
 
-#### 1. Engine 层 (`marneo/engine/`)
-
-**职责：** LLM 调用、流式输出、Agentic Loop
-
-**`chat.py` — ChatSession**
-
-```python
-# 单次流式对话（无工具）
-async for event in session.send(text, attachments=None):
-    # event.type: "text" | "thinking" | "error" | "done"
-
-# Agentic loop（带工具调用）
-async for event in session.send_with_tools(text, registry=registry,
-                                           attachments=None, max_iterations=20):
-    # event.type: "text" | "tool_call" | "tool_result" | "error" | "done"
-```
-
-**Agentic Loop 流程：**
-```
-用户消息
-    → LLM（携带工具定义）
-    → 返回 tool_call？
-        → 是：执行工具 → 结果注入 messages → 继续
-        → 否：yield 文本 → 结束
-```
-
-**`_build_content_blocks()` — 多模态构建：**
-- `text/plain`, `application/json` → 内容直接注入为文本（≤200KB）
-- `image/*` → OpenAI `image_url` block / Anthropic `image` source block
-- `application/pdf` → Anthropic `document` block / OpenAI 文本提示
-- 超过 20MB 的附件 → 提示文件过大，不编码
-
-**`provider.py` — Provider 解析：**
-支持所有 OpenAI-compatible 和 Anthropic-compatible 端点，从 `~/.marneo/config.yaml` 读取配置。
-
----
-
-#### 2. Tools 层 (`marneo/tools/`)
-
-**职责：** 工具注册、调度、执行
-
-**设计原则：工具描述极简化**
-
-工具 description 只描述功能（≤2行），不包含详细用法文档。详细用法以 skill 形式存入 `~/.marneo/skills/`，通过记忆系统按需检索加载（避免 OpenClaw 式的 40KB system prompt）。
-
-**`registry.py` — Tool Registry（hermes-agent 模式）**
-
-```python
-registry.register(
-    name="bash",
-    description="Execute a bash command.",
-    schema={...},          # OpenAI function calling 格式
-    handler=bash_fn,
-    check_fn=lambda: bool(shutil.which("bash")),  # 可用性检查
-    is_async=False,
-)
-```
-
-调度：`registry.dispatch(name, args)` → 捕获所有异常 → 返回 JSON 字符串
-
-**核心工具：**
-
-| 工具 | 功能 | 安全限制 |
-|------|------|---------|
-| `bash` | Shell 命令执行 | 危险命令正则拦截（rm -rf /、fork bomb、mkfs等） |
-| `read_file` | 读文件（带行号分页） | 100KB 上限，自动截断 |
-| `write_file` | 写文件（自动建目录） | 无 |
-| `edit_file` | 精确字符串替换 | old_string 必须唯一 |
-| `glob` | 按 pattern 查找文件 | 结果上限 200 条 |
-| `grep` | 正则搜索文件内容 | 文件上限 100 个，结果 500 条 |
-| `web_fetch` | 抓取 URL 为纯文本 | 仅 http/https，50KB 上限 |
-| `web_search` | DuckDuckGo 搜索 | 结果上限 10 条 |
-| `lark_cli` | 飞书 CLI 全套操作 | 自动注入 app_id/app_secret，--as bot |
-
-**`lark_cli` 工作原理：**
-1. 从 `EmployeeFeishuConfig` 读取 `app_id` / `app_secret`
-2. 自动运行 `lark-cli config init --app-id ... --app-secret-stdin ...`（首次/凭证变更时）
-3. 执行命令时自动追加 `--as bot --format json`
-4. 返回 JSON 结构化输出
-
----
-
-#### 3. Gateway 层 (`marneo/gateway/`)
-
-**职责：** IM 渠道接入、消息路由、Reaction 管理
-
-**`base.py` — ChannelMessage**
-
-```python
-@dataclass
-class ChannelMessage:
-    platform: str          # "feishu:老七"、"telegram" 等
-    chat_id: str
-    text: str = ""
-    msg_id: str = ""       # 用于去重
-    attachments: list[dict] = field(default_factory=list)
-    # attachment: {"data": bytes, "media_type": str, "filename": str}
-```
-
-**`manager.py` — GatewayManager**
-
-```
-ChannelMessage
-    → 去重检查（disk-persistent MessageDeduplicator）
-    → SessionStore.get_or_create()（按 platform:chat_id 获取 ChatSession）
-    → 串行锁（per-chat Lock，对应 openclaw createChatQueue）
-    → _process()
-        → engine.send_with_tools(text, registry, attachments)
-        → 收集 "text" events → 分段发送回 IM
-```
-
-**`adapters/feishu.py` — Feishu 适配器**
-
-关键设计（参考 hermes-agent）：
-
-- **WS 连接**：`lark_oapi.ws.Client` 在 executor 线程中运行，patch `ws_client_module.loop = loop` 解决主 event loop 冲突问题
-- **Pending 队列**：启动窗口期收到的消息入队，loop ready 后重放（不丢消息）
-- **Per-chat 串行锁**：`_get_chat_lock(chat_id)` 保证同一聊天的消息顺序处理
-- **Reaction 生命周期**：
-  ```
-  收到消息 → add_reaction("SaluteFace")  # 致敬，表示处理中
-  处理成功 → delete_reaction(reaction_id)  # 移除
-  处理失败 → add_reaction("CrossMark")   # 标记失败
-  ```
-- **附件下载**：`_download_feishu_resource(message_id, file_key, type)` 使用 `client.im.v1.message_resource.get`（hermes-agent 模式），支持 image/file/audio
-- **Markdown 渲染**：检测到 markdown 特征 → 发送 `post` 类型（`{"tag": "md", "text": content}`），否则发 `text` 类型
-- **Reply Fallback**：reply 目标被撤回时（error code 230011/231003）自动降级为 create
-
----
-
-#### 4. Employee 层 (`marneo/employee/`)
-
-**职责：** 员工身份、成长、技能、报告
-
-**数据文件：**
-```
-~/.marneo/employees/<name>/
-├── profile.yaml      # 等级、对话统计、成就
-├── SOUL.md           # 身份自述（hire 面试生成）
-├── feishu.yaml       # 专属飞书 Bot 凭证
-├── push.yaml         # 报告推送配置
-└── reports/          # 日报/周报
-```
-
-**`profile.py` — 员工档案**
-
-等级体系：实习生 → 初级员工 → 中级员工 → 高级员工
-
-升级条件通过 `growth.py` 中的 `should_level_up()` 检查，满足条件时员工在对话中发起升级请求，用户输入 `y` 确认。
-
-**`interview.py` — AI 面试**
-
-多轮动态面试（多选题 + 自由补充）→ `synthesize_soul()` 生成 SOUL.md。
-相同逻辑也用于项目面试（`project/interview.py`）。
-
-**`skill_learner.py` — 技能自动提炼**
-
-每次对话结束后，对实习生/初级员工：
-```
-对话内容 → LLM 判断是否有可提炼技能 → 非 SKIP → 写入 ~/.marneo/skills/
-```
-
-> ⚠️ **即将重构**：技能系统将迁移至分层记忆系统（BM25+向量混合检索），不再预加载所有技能到 system prompt。
-
----
-
-#### 5. Project 层 (`marneo/project/`)
-
-**职责：** 项目管理、技能管理
-
-**数据文件：**
-```
-~/.marneo/projects/<name>/
-├── project.yaml      # 描述、目标、成员、团队配置
-├── AGENT.md          # 工作档案（项目面试生成）
-└── skills/           # 项目专属技能
-```
-
-`workspace.py` 提供 CRUD 操作：`create_project`, `load_project`, `assign_employee`, `get_employee_projects`
-
-**`skills.py` — 技能管理**
-
-技能以 `.md` 文件存储（YAML frontmatter + 内容正文）：
-```markdown
----
-name: pandas 编码处理
-description: 处理飞书导出数据的 UTF-8 编码问题
-scope: global
-enabled: true
----
-
-pd.read_csv(path, encoding='utf-8-sig')
-```
-
-> ⚠️ **即将重构**：`get_skills_context()` 将被 `retrieve_relevant_skills(query)` 替代。
-
----
-
-#### 6. Collaboration 层 (`marneo/collaboration/`)
-
-**职责：** 多员工团队协作
-
-**`team.py` — TeamConfig**
-
-```python
-TeamConfig(
-    project_name="ops",
-    coordinator="老七",      # 协调者
-    members=[
-        TeamMember("老七", "协调者"),
-        TeamMember("ARIA", "数据分析"),
-    ]
-)
-```
-
-**`coordinator.py` — run_team_session()**
-
-```
-用户消息（复杂任务）
-    → split_task_for_specialists()   # 协调者拆分子任务
-    → asyncio.gather(*specialist_sessions)  # 并行执行各专员 ChatSession
-    → aggregate_results()            # 协调者汇总
-    → 返回最终回复
-```
-
-触发条件：消息 > 100 字 或含「分析/计划/报告」等关键词（`should_use_team()` 检查）。
-
----
-
-#### 7. Memory 层（设计中）
-
-**职责：** 分层记忆、混合检索、context 体积管理
-
-**三层架构：**
-
-```
-Core Memory（永远加载，≤1000 chars）
-    写入：人工设定 + LLM 自动提炼 + 经验晋升
-    存储：~/.marneo/employees/<name>/memory/core.md
-
-Episodic Memory（按需检索注入）
-    包含：工作经验 + Skills（~/.marneo/skills/）
-    检索：BM25（rank-bm25）+ 向量（fastembed，本地~50MB）
-    存储：~/.marneo/employees/<name>/memory/episodes/
-
-Working Memory（当前对话，有上限）
-    默认：最近 20 轮，超出移除最早轮次
-    任务完成 → 提炼经验 → 清空
-```
-
-**System prompt 固定上限（可配置）：**
-```yaml
-context_budget:
-  system_prompt_max: 4000     # SOUL + Core Memory，不含 skills
-  working_memory_turns: 20
-  episodic_inject_max: 1500   # 每轮动态注入上限
-  tool_result_max: 50000      # 单次工具结果上限
-```
-
-详细设计见：`docs/plans/2026-04-24-memory-system-design.md`
-
----
-
-### 数据流闭环
-
-```
-① 招聘（hire）
-   AI 面试 → SOUL.md（身份）→ profile.yaml（等级）
-
-② 配置飞书（employees feishu setup）
-   app_id/app_secret → feishu.yaml → probe_bot() 验证
-
-③ 创建项目（projects new）
-   AI 面试 → AGENT.md（工作档案）→ project.yaml（目标/成员）
-
-④ 分配员工（assign）
-   employee ↔ project 绑定
-
-⑤ 启动网关（gateway start）
-   load_all_tools()          # 注册所有工具
-   → FeishuAdapter.connect() # WS 连接 + Bot 身份获取
-   → GatewayManager.run_forever()
-
-⑥ 接收消息（飞书 → Gateway → Engine）
-   消息到达 → 去重 → 下载附件
-   → 预检索记忆/技能（BM25+向量）
-   → 构建 system prompt（SOUL + Core Memory + 检索到的经验）
-   → send_with_tools()  Agentic Loop
-   → 工具调用（bash/文件/lark_cli/...）
-   → LLM 生成回复 → Markdown 渲染 → 飞书 post 消息
-
-⑦ 对话后处理
-   技能提炼 → ~/.marneo/skills/
-   对话记录 → reports/（日报/周报）
-   经验晋升检查 → core.md（如达到阈值）
-   对话计数 → profile.yaml → 成长检查
-
-⑧ 成长（work 对话中）
-   对话 N 次 + 在职天数 → 满足条件 → 员工申请升级
-   用户输入 y → promote() → profile.yaml 更新
-```
-
----
-
-### 命令参考
-
-#### 员工管理
 ```bash
-marneo hire                          # 招聘（AI 面试 → SOUL.md）
-marneo work                          # 与员工对话（自动携带项目/记忆上下文）
-marneo work --employee 老七           # 指定员工
-
-marneo employees list                # 列出所有员工
-marneo employees show <name>         # 查看详情（等级/成就/SOUL.md）
-marneo employees fire <name>         # 解雇员工
-marneo employees feishu setup <name> # 配置专属飞书 Bot
+marneo setup feishu
 ```
 
-#### 项目管理
+指定员工：
+
 ```bash
-marneo projects new <name>           # 创建项目（AI 面试 → AGENT.md）
-marneo projects list / show <name>
-marneo assign <project>              # 分配员工到项目
+marneo setup feishu --employee laoqi
+# 或
+marneo setup feishu -e laoqi
 ```
 
-#### 技能管理
-```bash
-marneo skills list                   # 列出所有技能（global + 项目）
-marneo skills add <id>               # 手动创建技能
-marneo skills show <id>              # 查看技能内容
-marneo skills enable/disable <id>
+它会引导你创建或绑定飞书应用，保存为：
+
+```text
+~/.marneo/employees/laoqi/feishu.yaml
 ```
 
-#### 报告
-```bash
-marneo report daily                  # 今日日报
-marneo report daily --push           # 推送到 IM 渠道
-marneo report weekly                 # 周报
-marneo report history [-n 7]
+最终网关里会出现的 channel 是：
+
+```text
+feishu:laoqi
 ```
 
-#### IM 网关
+底层仍兼容旧命令：
+
 ```bash
-marneo gateway start / stop / restart / status / logs
-marneo gateway channels list/add/test/enable/disable <platform>
-marneo gateway install-service       # 安装系统服务（开机自启）
+marneo employees feishu setup laoqi
 ```
+
+### 5. 启动网关
+
+```bash
+marneo gateway start
+marneo gateway status
+```
+
+如果你新增或修改了飞书机器人配置：
+
+```bash
+marneo gateway restart
+```
+
+查看健康状态：
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
+期望看到：
+
+```json
+{
+  "status": "ok",
+  "connected_channels": ["feishu:laoqi"]
+}
+```
+
+查看日志：
+
+```bash
+marneo gateway logs
+# 或
+cat ~/.marneo/gateway.log
+```
+
+注意：日志和配置中可能包含凭证，提交 issue 或截图前请先脱敏。
 
 ---
 
-### 支持的 LLM Provider
+## 多飞书机器人模式
 
-所有 OpenAI-compatible 和 Anthropic-compatible 端点均支持：
+Marneo 的推荐模型不是“一个全局飞书机器人代理所有员工”，而是：
 
-| Provider | 协议 | 多模态 |
-|----------|------|--------|
-| Anthropic Claude | anthropic-compatible | ✅ 图片 + PDF |
-| OpenAI GPT-4o | openai-compatible | ✅ 图片 |
-| MiniMax M2.7 | openai-compatible | ✅ 图片 |
-| DeepSeek | openai-compatible | — |
-| 阿里云百炼（Qwen） | openai-compatible | ✅ |
-| 月之暗面（Kimi） | openai-compatible | ✅ |
-| Ollama（本地） | openai-compatible | 取决于模型 |
-| 自定义端点 | 自动推断 | — |
-
----
-
-### 支持的 IM 渠道
-
-| 渠道 | 接入方式 | 特性 |
-|------|---------|------|
-| 飞书 / Feishu | WebSocket（lark-oapi） | Markdown 渲染、附件下载、Reaction、per-employee Bot |
-| 微信 / WeChat | Tencent iLink Bot | 长轮询、断线重连 |
-| Telegram | Bot API | 群组/私聊 |
-| Discord | Bot API | 服务器/DM |
-
----
-
-### 员工成长体系
-
-| 等级 | 条件 | 行为 |
-|------|------|------|
-| 实习生 | 入职即有 | 自动提炼技能，多学多问 |
-| 初级员工 | 7天 + 20对话 | 完成任务，主动汇报 |
-| 中级员工 | 14天 + 50对话 + 3技能 | 主动沟通，提出优化 |
-| 高级员工 | 30天 + 100对话 + 8技能 | 全局视野，战略建议 |
-
----
-
-### 数据目录结构
-
+```text
+一个员工 = 一个员工身份 = 一个飞书 Bot 配置 = 一个 channel
 ```
+
+示例：
+
+```text
+~/.marneo/employees/laoqi/feishu.yaml  -> feishu:laoqi
+~/.marneo/employees/aria/feishu.yaml   -> feishu:aria
+~/.marneo/employees/ops/feishu.yaml    -> feishu:ops
+```
+
+配置流程：
+
+```bash
+marneo hire
+marneo setup feishu --employee laoqi
+
+marneo hire
+marneo setup feishu --employee aria
+
+marneo gateway restart
+marneo gateway status
+```
+
+这样每个飞书机器人都可以用不同的应用凭证、不同的团队群、不同的员工身份在线工作。
+
+---
+
+## Feishu/Lark 接入细节
+
+### 支持能力
+
+| 能力 | 状态 |
+|---|---|
+| WebSocket 长连接 | 支持 |
+| 文本消息收发 | 支持 |
+| Markdown / post 渲染 | 支持 |
+| 图片 / 文件下载 | 支持 |
+| per-chat 串行处理 | 支持 |
+| 消息去重 | 支持，磁盘持久化 |
+| Reaction 生命周期 | 支持 |
+| ask_user 交互卡片 | 支持 |
+| CardKit 更新 | 使用 PUT |
+| CARD WebSocket monkey patch | 默认关闭，需显式启用 |
+
+### ask_user 卡片
+
+Marneo 支持 LLM 在工作流里主动向用户提问，并通过飞书卡片收集答案。
+
+关键点：
+
+- 支持新版 Feishu form submit callback
+- 支持从 `action.form_value` 读取用户输入
+- 支持 submit button name 中携带 question id
+- 支持 pending question 过期/重复提交保护
+- 更新卡片时使用 CardKit `PUT /cardkit/v1/cards/{card_id}`
+
+### CARD WebSocket patch
+
+为了保证普通消息稳定，CARD WebSocket monkey patch 默认关闭：
+
+```bash
+# 默认：关闭
+marneo gateway start
+
+# 高风险调试时才开启
+MARNEO_FEISHU_ENABLE_CARD_WS_PATCH=1 marneo gateway start
+```
+
+默认模式优先保证普通 Feishu text EVENT 正常进入网关。
+
+---
+
+## 架构
+
+```text
+Feishu / Lark
+    ↓ WebSocket events
+FeishuChannelAdapter
+    ↓ ChannelMessage(text, attachments, platform=feishu:<employee>)
+GatewayManager
+    ├─ disk-persistent dedup
+    ├─ per-chat serial lock
+    ├─ session routing
+    ↓
+ChatSession
+    ├─ provider streaming
+    ├─ multimodal content blocks
+    ├─ tool calling loop
+    ↓
+Tool Registry
+    ├─ bash / files / web
+    ├─ lark_cli
+    └─ ask_user
+    ↓
+Feishu reply / card / file / markdown
+```
+
+### 主要模块
+
+| 路径 | 作用 |
+|---|---|
+| `marneo/cli/app.py` | CLI 入口 |
+| `marneo/cli/setup_cmd.py` | Provider 与 Feishu-first setup 向导 |
+| `marneo/cli/employee_feishu_cmd.py` | 员工专属飞书 Bot 配置 |
+| `marneo/employee/feishu_config.py` | `feishu.yaml` 读写模型 |
+| `marneo/gateway/manager.py` | 网关生命周期、消息分发、session 管理 |
+| `marneo/gateway/adapters/feishu.py` | Feishu/Lark WebSocket 适配器 |
+| `marneo/gateway/pending_questions.py` | ask_user pending question 管理 |
+| `marneo/tools/core/ask_user.py` | 交互式用户确认工具 |
+| `marneo/engine/chat.py` | LLM streaming + tool calling loop |
+| `marneo/tools/registry.py` | 工具注册与调度 |
+
+---
+
+## 数据目录
+
+```text
 ~/.marneo/
-├── config.yaml              # LLM Provider + 渠道配置
-├── gateway.pid / gateway.log
-├── skills/                  # 全局技能（~/.marneo/skills/*.md）
-├── feishu/                  # 飞书去重缓存
+├── config.yaml                    # LLM Provider 配置
+├── gateway.pid
+├── gateway.log
 ├── employees/
-│   └── 老七/
-│       ├── profile.yaml     # 等级、统计
-│       ├── SOUL.md          # 身份自述
-│       ├── feishu.yaml      # 专属 Bot 凭证
-│       ├── push.yaml        # 报告推送配置
-│       ├── memory/          # 分层记忆（设计中）
-│       │   ├── core.md      # 核心约束，永远加载
-│       │   └── episodes/    # 经验记忆，BM25+向量检索
-│       └── reports/
-└── projects/
-    └── <name>/
-        ├── project.yaml     # 配置、目标、团队
-        ├── AGENT.md         # 工作档案
-        └── skills/          # 项目专属技能
+│   └── <employee>/
+│       ├── profile.yaml           # 员工档案
+│       ├── SOUL.md                # 员工身份设定
+│       ├── feishu.yaml            # 员工专属飞书 Bot 凭证
+│       ├── push.yaml              # 推送配置
+│       ├── memory/                # 分层记忆
+│       └── reports/               # 日报/周报
+├── projects/
+│   └── <project>/
+│       ├── project.yaml
+│       ├── AGENT.md
+│       └── skills/
+└── skills/                        # 全局技能
+```
+
+请不要把 `~/.marneo/config.yaml`、`~/.marneo/employees/*/feishu.yaml`、日志、真实邮件/客户数据提交到 Git。
+
+---
+
+## 常用命令
+
+### Setup
+
+```bash
+marneo setup                         # 配置 Provider；已配置时可跳过去配置飞书
+marneo setup feishu                  # 选择员工并配置飞书 Bot
+marneo setup feishu --employee NAME  # 为指定员工配置飞书 Bot
+```
+
+### 员工
+
+```bash
+marneo hire
+marneo employees list
+marneo employees show NAME
+marneo employees feishu setup NAME
+marneo employees feishu status NAME
+```
+
+### 工作
+
+```bash
+marneo work
+marneo work --employee NAME
+```
+
+### 项目
+
+```bash
+marneo projects new PROJECT
+marneo projects list
+marneo projects show PROJECT
+marneo assign PROJECT
+```
+
+### 网关
+
+```bash
+marneo gateway start
+marneo gateway stop
+marneo gateway restart
+marneo gateway status
+marneo gateway logs
+```
+
+### 测试
+
+```bash
+python3 -m pytest tests -q
 ```
 
 ---
 
-### 路线图
+## 安全与凭证
 
-- ✅ Phase 1 — CLI + Provider + Chat TUI
-- ✅ Phase 2 — 员工体系（hire / work / report / growth）
-- ✅ Phase 3 — 项目体系（projects / assign / skills）
-- ✅ Phase 4 — Gateway（Feishu / WeChat / Telegram / Discord）
-- ✅ Phase 5 — 飞书完整化（per-employee Bot / Markdown / 多模态附件）
-- ✅ Phase 6 — 工具能力（Agentic Loop / bash / file / web / lark_cli）
-- 🔄 Phase 7 — 分层记忆系统（Core / Episodic / BM25+向量混合检索）
-- 📋 Phase 8 — 可靠性（熔断器 / 断线重连 / 消息队列持久化）
+Marneo 会处理多类敏感信息：
+
+- LLM Provider API key
+- Feishu App ID / App Secret
+- Feishu WebSocket ticket / access key
+- 飞书 chat id / open id
+- 客户文件、邮件、聊天记录
+
+提交代码前建议执行：
+
+```bash
+git diff --cached
+python3 -m pytest tests -q
+```
+
+并检查是否误提交：
+
+```text
+api_key
+app_secret
+access_token
+refresh_token
+ticket=
+access_key=
+Authorization: Bearer
+```
+
+本仓库应该只提交示例配置和脱敏文档，不提交真实凭证。
 
 ---
 
-## English Documentation
+## English
 
-### Design Philosophy
+### What is Marneo?
 
-Marneo is a **work-focused digital employee system**, not a personal assistant.
+Marneo is a work-focused digital employee system.
 
-**Key differentiator from OpenClaw / Hermes:**
+Instead of building one giant personal assistant, Marneo creates named AI employees that can be assigned to projects, connected to Feishu/Lark bots, equipped with tools, and organized into teams.
 
-The core problem with existing systems: system prompt grows unbounded as skills and history accumulate, causing increasingly slow and expensive responses. OpenClaw's system prompt alone exceeds 40KB.
+The current product focus is Feishu-first:
 
-Marneo's approach:
-- **Fixed system prompt size** — default ≤4,500 chars regardless of how many skills are added
-- **Layered memory** — Core (always loaded) / Episodic (retrieved on-demand) / Working (capped window)
-- **Skills never pre-loaded** — retrieved via BM25+vector hybrid search, injected per-turn, then discarded
-- **Tool descriptions are minimal** — 1-2 lines max; detailed docs live as retrievable skills
+- one employee can have one dedicated Feishu/Lark bot
+- each bot becomes a concrete gateway channel: `feishu:<employee>`
+- multiple Feishu bots can run side by side
+- setup is optimized for Feishu onboarding before broader channel generalization
 
 ### Quick Start
 
 ```bash
-pip install -e .
-marneo setup          # Configure LLM Provider
-marneo hire           # Hire your first digital employee (AI interview)
-marneo work           # Start chatting
+git clone git@github.com:ChamberZ40/marneo-agent.git
+cd marneo-agent
+python3 -m pip install -e '.[dev]'
+
+marneo setup
+marneo hire
+marneo setup feishu --employee laoqi
+marneo gateway start
+marneo gateway status
 ```
 
-### Architecture
+Expected channel:
 
-```
-User / IM Channel (Feishu · WeChat · Telegram · Discord)
-         ↓ message
-Gateway Layer (adapter per platform)
-  - WebSocket / Webhook connection
-  - Message parsing (text / image / file / rich-text)
-  - Attachment download (image/PDF → bytes for multimodal)
-  - Reaction lifecycle (processing → done / failed)
-  - Markdown rendering (Feishu post type with md tag)
-         ↓ ChannelMessage(text, attachments)
-GatewayManager
-  - Dedup (disk-persistent, 24h TTL)
-  - Per-chat serial lock (like openclaw createChatQueue)
-         ↓
-Engine Layer (ChatSession)
-  send_with_tools() — Agentic Loop
-  LLM → tool_call? → execute → inject result → repeat until text
-  Multimodal content blocks (OpenAI image_url / Anthropic document)
-         ↓
-Tools Layer (Registry)
-  bash · read_file · write_file · edit_file · glob · grep
-  web_fetch · web_search · lark_cli
-  lark_cli: wraps official lark-cli with auto-injected app credentials
-  200+ Feishu commands: docs / calendar / base / tasks / wiki / drive
+```text
+feishu:laoqi
 ```
 
-### Data Flow (Closed Loop)
+### Why Marneo?
 
+| Area | Marneo approach |
+|---|---|
+| Identity | Named digital employees, not anonymous assistants |
+| Context | Fixed prompt budget + retrieval, not unbounded prompt growth |
+| Work model | Projects, employees, reports, tools |
+| Feishu | Per-employee bot configuration |
+| Gateway | WebSocket, dedup, per-chat locks, watchdog recovery |
+| Tools | Minimal tool schemas, runtime dispatch, Feishu CLI integration |
+
+### Multiple Feishu Bots
+
+```bash
+marneo hire
+marneo setup feishu --employee laoqi
+
+marneo hire
+marneo setup feishu --employee aria
+
+marneo gateway restart
 ```
-hire → SOUL.md (identity) + profile.yaml (level)
-     ↓
-feishu setup → feishu.yaml (bot credentials)
-     ↓
-projects new → AGENT.md (work profile) + project.yaml
-     ↓
-assign → employee ↔ project binding
-     ↓
-gateway start → tools loaded → WS connected → ready
-     ↓
-message arrives → dedup → download attachments
-  → memory retrieval (BM25+vector: skills + episodes)
-  → build system prompt (SOUL + Core Memory + retrieved context)
-  → send_with_tools() agentic loop
-  → tool calls (bash / files / lark_cli / ...)
-  → LLM response → markdown render → reply to IM
-     ↓
-post-turn: skill extraction → reports → growth check
+
+Configuration layout:
+
+```text
+~/.marneo/employees/laoqi/feishu.yaml  -> feishu:laoqi
+~/.marneo/employees/aria/feishu.yaml   -> feishu:aria
 ```
 
-### Module Reference
+### Development
 
-| Module | Responsibility |
-|--------|---------------|
-| `engine/chat.py` | ChatSession, streaming, agentic loop, multimodal blocks |
-| `engine/provider.py` | LLM provider resolution from config |
-| `tools/registry.py` | Tool registration, dispatch, availability checks |
-| `tools/core/` | bash, files, web, lark_cli implementations |
-| `gateway/manager.py` | Message routing, dedup, session management |
-| `gateway/adapters/feishu.py` | Feishu WS adapter (hermes-agent + openclaw patterns) |
-| `employee/` | Profile, SOUL.md, growth, skill extraction, reports |
-| `project/` | Project workspace, AGENT.md, skills |
-| `collaboration/` | Multi-employee team sessions, coordinator logic |
-| `memory/` | *(planned)* Layered memory: Core + Episodic + Working |
+```bash
+python3 -m pip install -e '.[dev]'
+python3 -m pytest tests -q
+```
 
-### Supported LLM Providers
+Before committing or pushing, scan for secrets and avoid committing local runtime data from `~/.marneo/` or real user/customer data.
 
-Any OpenAI-compatible or Anthropic-compatible endpoint. Tested with Anthropic Claude, OpenAI GPT-4o, MiniMax M2.7, DeepSeek, Qwen, Kimi, Ollama.
+---
 
-### Supported IM Channels
+## License
 
-Feishu/Lark (WebSocket, per-employee bot, Markdown, multimodal), WeChat (iLink), Telegram, Discord.
+Apache 2.0. See `LICENSE`.

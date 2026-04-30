@@ -144,3 +144,7 @@ def _register_subcommands() -> None:
 
 
 _register_subcommands()
+
+
+if __name__ == "__main__":
+    app()

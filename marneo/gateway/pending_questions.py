@@ -271,8 +271,9 @@ class PendingQuestionStore:
 
     The old code used pending_question_store.create() / .resolve() with
     asyncio.Future. New code uses store_pending_question() / consume_pending_question()
-    directly. This wrapper exists ONLY to avoid import errors in any code
-    that still references the old API.
+    directly. This wrapper exists to keep older Feishu adapter call-sites working
+    while preserving the new non-blocking pattern: answers are injected as a
+    synthetic chat message in a new turn.
     """
 
     def has_pending_for_chat(self, chat_id: str) -> bool:
@@ -282,6 +283,119 @@ class PendingQuestionStore:
                 if ctx.chat_id == chat_id and not ctx.submitted:
                     return True
         return False
+
+    def resolve(self, question_id: str, answer: str | dict[str, str]) -> bool:
+        """Consume a question by id and inject its answer as synthetic text.
+
+        `answer` may be the legacy single-answer string or a dict keyed by the
+        original question text. Returns False when the question was expired or
+        already consumed.
+        """
+        ctx = consume_pending_question(question_id)
+        if ctx is None:
+            return False
+        answers = _normalise_answers(ctx, answer)
+        _schedule_answer_injection(ctx, answers)
+        return True
+
+    def resolve_by_chat_text(self, chat_id: str, raw_text: str) -> bool:
+        """Resolve the single pending question in a chat using a plain text reply."""
+        match: Optional[PendingQuestionContext] = None
+        with _lock:
+            for ctx in _pending_questions.values():
+                if ctx.chat_id != chat_id or ctx.submitted:
+                    continue
+                if match is not None:
+                    log.warning("[PendingQ] Text reply fallback ambiguous: multiple pending in chat %s", chat_id)
+                    return False
+                match = ctx
+        if match is None:
+            return False
+        ctx = consume_pending_question(match.question_id)
+        if ctx is None:
+            return False
+        answers = _normalise_answers(ctx, raw_text)
+        _schedule_answer_injection(ctx, answers)
+        return True
+
+
+def _normalise_answers(ctx: PendingQuestionContext, answer: str | dict[str, str]) -> dict[str, str]:
+    """Build question-text → answer mapping for card updates and synthetic text."""
+    if isinstance(answer, dict):
+        return {str(k): str(v) for k, v in answer.items()}
+
+    questions = ctx.questions or []
+    if not questions:
+        return {"回答": str(answer)}
+
+    # Legacy single-answer path: attach the text to the first question and mark
+    # the rest as unanswered instead of losing question context.
+    result: dict[str, str] = {}
+    for i, q in enumerate(questions):
+        question_text = str(q.get("question") or q.get("header") or f"问题 {i + 1}")
+        result[question_text] = str(answer) if i == 0 else "(no answer)"
+    return result
+
+
+def _format_answer_message(ctx: PendingQuestionContext, answers: dict[str, str]) -> str:
+    lines = ["用户已回答上一轮 ask_user 问题："]
+    for i, q in enumerate(ctx.questions or []):
+        question_text = str(q.get("question") or q.get("header") or f"问题 {i + 1}")
+        lines.append(f"- {question_text}: {answers.get(question_text, '(no answer)')}")
+    if not ctx.questions:
+        for key, value in answers.items():
+            lines.append(f"- {key}: {value}")
+    return "\n".join(lines)
+
+
+def _schedule_answer_injection(ctx: PendingQuestionContext, answers: dict[str, str]) -> None:
+    """Fire-and-forget card update + synthetic dispatch on the adapter loop."""
+    ctx.submitted = True
+    adapter = ctx.adapter
+    loop = getattr(adapter, "_loop", None) if adapter is not None else None
+    if adapter is None or loop is None or loop.is_closed():
+        log.warning("[PendingQ] Cannot inject answer for %s: adapter loop unavailable", ctx.question_id)
+        return
+
+    async def _inject() -> None:
+        try:
+            from marneo.gateway.base import ChannelMessage
+            from marneo.tools.core.ask_user import build_answered_card, build_processing_card, update_card
+
+            if ctx.card_id:
+                try:
+                    ctx.card_sequence += 1
+                    await update_card(adapter, ctx.card_id, build_processing_card(ctx.questions, answers), ctx.card_sequence)
+                except Exception as exc:
+                    log.debug("[PendingQ] Processing card update failed: %s", exc)
+
+            channel_msg = ChannelMessage(
+                platform=getattr(adapter, "platform", "feishu"),
+                chat_id=ctx.chat_id,
+                user_id=ctx.sender_open_id,
+                chat_type=ctx.chat_type or "p2p",
+                text=_format_answer_message(ctx, answers),
+                msg_id=f"ask_user:{ctx.question_id}",
+                context_token=ctx.thread_id or "",
+            )
+            await adapter._manager.dispatch(channel_msg)
+
+            if ctx.card_id:
+                try:
+                    ctx.card_sequence += 1
+                    await update_card(adapter, ctx.card_id, build_answered_card(ctx.questions, answers), ctx.card_sequence)
+                except Exception as exc:
+                    log.debug("[PendingQ] Answered card update failed: %s", exc)
+        except Exception as exc:
+            log.warning("[PendingQ] Failed to inject answer for %s: %s", ctx.question_id, exc)
+
+    try:
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(_inject(), loop)
+        else:
+            loop.create_task(_inject())
+    except RuntimeError as exc:
+        log.warning("[PendingQ] Cannot schedule answer injection for %s: %s", ctx.question_id, exc)
 
 
 # Module-level singleton for backward compat

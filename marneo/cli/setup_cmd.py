@@ -56,6 +56,13 @@ KNOWN_PROVIDERS = [
 ]
 
 
+def _provider_by_id(provider_id: str) -> dict | None:
+    for provider in KNOWN_PROVIDERS:
+        if provider["id"] == provider_id:
+            return provider
+    return None
+
+
 def _detect_protocol(url: str) -> str:
     u = url.lower()
     if "anthropic.com" in u or u.rstrip("/").endswith("/anthropic"):
@@ -63,11 +70,139 @@ def _detect_protocol(url: str) -> str:
     return "openai-compatible"
 
 
+def _api_key_from_env(provider_id: str) -> str | None:
+    """Return a ${ENV_VAR} reference for a known provider if that env var exists."""
+    import os
+
+    provider = _provider_by_id(provider_id)
+    if not provider:
+        return None
+    key_hint = str(provider.get("key_hint", ""))
+    if not key_hint or " " in key_hint or key_hint.startswith("("):
+        return None
+    if os.environ.get(key_hint):
+        return f"${{{key_hint}}}"
+    return None
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return "—"
+    if value.startswith("${") and value.endswith("}"):
+        return value
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def _build_provider_from_options(
+    provider_id: str,
+    api_key: str | None,
+    model: str | None,
+    base_url: str | None,
+    protocol: str | None,
+    use_env: bool = True,
+):
+    """Build a ProviderConfig from non-interactive setup options."""
+    from marneo.core.config import ProviderConfig
+
+    selected = _provider_by_id(provider_id)
+    if not selected:
+        raise ValueError(f"Unknown provider: {provider_id}")
+
+    final_base_url = base_url or str(selected.get("base_url", ""))
+    if not final_base_url:
+        raise ValueError("Base URL is required for custom provider")
+
+    final_protocol = protocol or str(selected.get("protocol", "")) or _detect_protocol(final_base_url)
+    final_model = model or (selected.get("models") or [""])[0]
+    final_api_key = api_key or (_api_key_from_env(provider_id) if use_env else None)
+    if not final_api_key:
+        raise ValueError("API key is required")
+
+    return ProviderConfig(
+        id=provider_id,
+        base_url=final_base_url,
+        api_key=final_api_key,
+        model=final_model,
+        protocol=final_protocol,
+    )
+
+
+def _existing_provider_choices() -> list[tuple[str, str]]:
+    """Actions shown when Provider already exists.
+
+    The first action must keep onboarding moving forward: users often want to add
+    another Feishu bot/channel, not re-enter their LLM provider credentials.
+    """
+    return [
+        ("skip_feishu", "跳过 Provider，继续新增/配置飞书机器人"),
+        ("reconfigure_provider", "重新配置 Provider"),
+        ("exit", "退出"),
+    ]
+
+
+def _feishu_next_steps(employee_name: str | None = None) -> str:
+    if employee_name:
+        setup_cmd = f"marneo setup feishu --employee {employee_name}"
+        channel = f"feishu:{employee_name}"
+    else:
+        setup_cmd = "marneo setup feishu"
+        channel = "feishu:<员工名>"
+    return (
+        "下一步：\n"
+        f"  1. 新增/更新飞书机器人 → {setup_cmd}\n"
+        f"  2. 重启网关 → marneo gateway restart\n"
+        f"  3. 查看状态 → marneo gateway status\n"
+        f"  4. 期望 channel → {channel}"
+    )
+
+
+def _choose_existing_provider_action() -> str:
+    from marneo.tui.select_ui import radiolist
+
+    choices = _existing_provider_choices()
+    idx = radiolist("Provider 已配置，下一步：", [label for _action, label in choices], default=0)
+    return choices[idx][0]
+
+
 @setup_app.callback(invoke_without_command=True)
 def setup_main(ctx: typer.Context) -> None:
     """配置 Marneo Provider。"""
     if ctx.invoked_subcommand is None:
         _run_setup()
+
+
+@setup_app.command("feishu")
+def setup_feishu(
+    employee: str | None = typer.Option(None, "--employee", "-e", help="要绑定飞书机器人的员工名称"),
+) -> None:
+    """新增/配置员工专属飞书 Bot，并形成 feishu:<员工名> channel。"""
+    _run_feishu_setup(employee)
+
+
+def _run_feishu_setup(employee_name: str | None = None) -> None:
+    from marneo.employee.profile import list_employees
+
+    target = employee_name
+    employees = list_employees()
+    if not target:
+        if not employees:
+            console.print("[yellow]还没有员工。请先运行 [bold]marneo hire[/bold] 创建员工，再运行 [bold]marneo setup feishu[/bold]。[/yellow]")
+            return
+        if len(employees) == 1:
+            target = employees[0]
+            console.print(f"[dim]使用唯一员工：{target}[/dim]")
+        else:
+            from marneo.tui.select_ui import radiolist
+            idx = radiolist("选择要绑定飞书机器人的员工：", employees, default=0)
+            target = employees[idx]
+
+    from marneo.cli.employee_feishu_cmd import cmd_setup as setup_employee_feishu
+
+    setup_employee_feishu(target)
+    console.print()
+    console.print(Panel(_feishu_next_steps(target), border_style="#00FFCC", padding=(1, 2)))
 
 
 def _run_setup() -> None:
@@ -85,12 +220,16 @@ def _run_setup() -> None:
 
     cfg = load_config()
     if cfg.provider:
-        console.print(f"[green]✓ 已配置: {cfg.provider.id} / {cfg.provider.model}[/green]")
+        console.print(f"[green]✓ 已配置 Provider: {cfg.provider.id} / {cfg.provider.model}[/green]")
+        console.print("[dim]如果只是新增飞书机器人/channel，不需要重新配置 Provider。[/dim]")
         try:
-            ans = pt_prompt("  重新配置？(y/N) ").strip().lower()
+            action = _choose_existing_provider_action()
         except KeyboardInterrupt:
             return
-        if ans not in ("y", "yes"):
+        if action == "skip_feishu":
+            _run_feishu_setup()
+            return
+        if action != "reconfigure_provider":
             return
 
     items = [f"{p['name']}  ({', '.join(p['models'][:2])})" for p in KNOWN_PROVIDERS]
@@ -142,7 +281,7 @@ def _run_setup() -> None:
     console.print("\n[dim]测试连接...[/dim]")
     _test_provider(provider)
     console.print(f"\n[green]✓ 配置已保存 → {path}[/green]")
-    console.print("[dim]运行 marneo work 开始工作。[/dim]")
+    console.print(f"[dim]{_feishu_next_steps()}[/dim]")
 
 
 def _test_provider(provider: "ProviderConfig") -> None:

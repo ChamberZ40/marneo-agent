@@ -14,6 +14,7 @@ from marneo.tools.core.ask_user import (
     build_processing_card,
     build_answered_card,
     build_expired_card,
+    update_card,
 )
 
 
@@ -61,6 +62,55 @@ class TestCardBuilders:
     def test_expired_card(self):
         card = build_expired_card(self._QUESTIONS)
         assert card["header"]["template"] == "grey"
+
+
+@pytest.mark.asyncio
+async def test_update_card_uses_put_cardkit_endpoint(monkeypatch):
+    """Card Kit card entity updates use PUT /cardkit/v1/cards/{card_id}.
+
+    Feishu returns 404 for PATCH here, leaving expired/answered cards visually
+    active even after the pending question is consumed.
+    """
+    adapter = MagicMock()
+    adapter._domain = "feishu"
+
+    calls = []
+
+    class FakeResponse:
+        def json(self):
+            return {"code": 0, "msg": "ok"}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def put(self, url, headers=None, content=None):
+            calls.append(("PUT", url, headers, content))
+            return FakeResponse()
+
+        async def patch(self, url, headers=None, content=None):  # pragma: no cover - must not be used
+            calls.append(("PATCH", url, headers, content))
+            return FakeResponse()
+
+    monkeypatch.setattr("marneo.tools.core.ask_user._get_tenant_token", AsyncMock(return_value="tok"))
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    ok = await update_card(adapter, "card123", build_expired_card(TestCardBuilders._QUESTIONS), 2)
+
+    assert ok is True
+    assert calls
+    assert calls[0][0] == "PUT"
+    assert calls[0][1].endswith("/cardkit/v1/cards/card123")
+    payload = json.loads(calls[0][3])
+    assert isinstance(payload["card"], dict)
+    assert payload["card"]["type"] == "card_json"
+    assert isinstance(payload["card"]["data"], str)
 
 
 @pytest.mark.asyncio

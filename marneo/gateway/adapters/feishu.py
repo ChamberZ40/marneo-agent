@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -114,46 +115,150 @@ _REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # withdrawn/missing
 
 
 # ---------------------------------------------------------------------------
-# _run_feishu_ws_client — must be module-level so it can be pickled by executor
-# Technique from hermes-agent: patch ws_client_module.loop before start()
+# Patch lark-oapi SDK: route CARD messages through event handler
+# The SDK silently drops MessageType.CARD (line 24-25 of _handle_data_frame).
+# This module-level patch replaces the class method ONCE at import time.
+# ---------------------------------------------------------------------------
+
+def _patch_lark_oapi_card_handling() -> None:
+    """Monkey-patch Client._handle_data_frame to handle CARD same as EVENT.
+
+    This is the Python equivalent of openclaw-lark's lark-client.js line 344
+    patch. Kept out of default import-time execution; the Feishu WebSocket
+    startup path enables it explicitly so CARD callbacks are routable at runtime.
+    """
+    try:
+        from lark_oapi.ws import Client
+        from lark_oapi.ws.enum import MessageType
+
+        import base64 as _b64
+        import http as _http
+        import time as _time
+        from lark_oapi.ws.model import Response
+        from lark_oapi.core import JSON as _JSON
+
+        # Store original for reference
+        _original = Client._handle_data_frame
+
+        async def _fixed_handle_data_frame(self: Any, frame: Any) -> None:
+            """_handle_data_frame with CARD support (patches the silent `return`)."""
+            hs = frame.headers
+            # Re-use SDK's internal helpers
+            msg_id = ""
+            trace_id = ""
+            sum_ = "1"
+            seq = "0"
+            type_ = ""
+            for h in hs:
+                if h.key == "message_id":
+                    msg_id = h.value
+                elif h.key == "trace_id":
+                    trace_id = h.value
+                elif h.key == "sum":
+                    sum_ = h.value
+                elif h.key == "seq":
+                    seq = h.value
+                elif h.key == "type":
+                    type_ = h.value
+
+            pl = frame.payload
+            if int(sum_) > 1:
+                pl = self._combine(msg_id, int(sum_), int(seq), pl)
+                if pl is None:
+                    return
+
+            message_type = MessageType(type_)
+
+            resp = Response(code=_http.HTTPStatus.OK)
+            try:
+                start = int(round(_time.time() * 1000))
+                if message_type == MessageType.EVENT:
+                    result = self._event_handler.do_without_validation(pl)
+                elif message_type == MessageType.CARD:
+                    # THIS IS THE FIX: treat CARD same as EVENT
+                    result = self._event_handler.do_without_validation(pl)
+                else:
+                    return
+                end = int(round(_time.time() * 1000))
+                header = hs.add()
+                header.key = "biz_rt"
+                header.value = str(end - start)
+                if result is not None:
+                    resp.data = _b64.b64encode(_JSON.marshal(result).encode("utf-8"))
+            except Exception as e:
+                log.error("[Feishu] handle message failed: type=%s, msg_id=%s, err=%s",
+                          type_, msg_id, e)
+                resp = Response(code=_http.HTTPStatus.INTERNAL_SERVER_ERROR)
+
+            frame.payload = _JSON.marshal(resp).encode("utf-8")
+            await self._write_message(frame.SerializeToString())
+
+        Client._handle_data_frame = _fixed_handle_data_frame
+        log.info("[Feishu] Patched lark-oapi Client._handle_data_frame for CARD support")
+    except Exception as exc:
+        log.warning("[Feishu] Failed to patch lark-oapi CARD handling: %s", exc)
+
+
+def _feishu_card_ws_patch_enabled() -> bool:
+    """Return True only when the risky lark-oapi CARD monkey patch is explicitly enabled."""
+    return os.getenv("MARNEO_FEISHU_ENABLE_CARD_WS_PATCH", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+# Apply optional patch only when explicitly requested.
+# Default stays unpatched because the global SDK monkey patch can break normal
+# message delivery even when it only changes the CARD branch.
+if _feishu_card_ws_patch_enabled():
+    _patch_lark_oapi_card_handling()
+
+
+# ---------------------------------------------------------------------------
+# _run_feishu_ws_client — hermes pattern
 # ---------------------------------------------------------------------------
 
 def _run_feishu_ws_client(app_id: str, app_secret: str, domain: Any,
                           handler: Any, on_ready: Any) -> None:
-    """Run lark-oapi WS client in executor thread with a clean event loop.
+    """Run lark-oapi WS client in executor thread.
 
-    Key fix: create the Client INSIDE the thread so asyncio.Lock() in __init__
-    binds to the thread-local loop, not the main loop. This prevents
-    "Future attached to a different loop" errors that cause ping_timeout.
+    Hermes pattern:
+    - auto_reconnect=False — SDK reconnect causes "different loop" crashes
+    - Client created inside thread — asyncio.Lock() binds to thread loop
+    - When start() exits (connection lost), thread simply returns
+    - Adapter watchdog detects death → kills thread → creates brand new one
     """
     import lark_oapi.ws.client as ws_client_module
     from lark_oapi.ws import Client as FeishuWSClient
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    ws_client_module.loop = loop  # module-level loop used by start()/_connect()
+    ws_client_module.loop = loop
 
-    # Create client HERE so asyncio.Lock() binds to this thread's loop
     ws_client = FeishuWSClient(
         app_id=app_id,
         app_secret=app_secret,
         event_handler=handler,
         domain=domain,
-        auto_reconnect=True,
+        auto_reconnect=False,  # CRITICAL: disable SDK reconnect (hermes pattern)
     )
-    # Pass the client back to the adapter for disconnect
-    on_ready(ws_client)
+    # TODO: CARD callback routing — need to investigate why patching
+    # _handle_data_frame breaks message delivery even when only touching CARD branch
+    on_ready(ws_client, loop)
 
     try:
         ws_client.start()
     except Exception as exc:
-        log.error("[Feishu] WS client error: %s", exc)
+        log.error("[Feishu] WS client exited: %s", exc)
     finally:
-        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-        for task in pending:
-            task.cancel()
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        # Clean up loop
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
         try:
             loop.stop()
         except Exception:
@@ -162,6 +267,7 @@ def _run_feishu_ws_client(app_id: str, app_secret: str, domain: Any,
             loop.close()
         except Exception:
             pass
+        log.info("[Feishu] WS thread exited cleanly")
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +342,9 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
         # WS state
         self._ws_client: Any = None
+        self._ws_loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws_future: Any = None
+        self._ws_started_time: float = 0
         self._config: dict[str, Any] = {}
 
         # Main loop — captured at connect() time for thread-safe dispatch
@@ -330,21 +438,118 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             return False  # never received, still starting up
         return time.monotonic() - self._last_event_time > threshold
 
+    def _ws_connection_lost(self, startup_grace: float = 30) -> bool:
+        """Detect lark-oapi receive-loop death while Client.start() still blocks.
+
+        The SDK starts _receive_message_loop as a background task and then blocks
+        forever in _select().  If the receive task exits, _disconnect() clears
+        client._conn, but the executor future can stay alive.  Treat that as a
+        dead WS after a short grace window for initial _connect().
+        """
+        ws_client = self._ws_client
+        if ws_client is None:
+            return False
+
+        started = self._ws_started_time
+        if started and time.monotonic() - started < startup_grace:
+            return False
+
+        conn = getattr(ws_client, "_conn", None)
+        if conn is None:
+            return True
+        if getattr(conn, "closed", False):
+            return True
+        if getattr(conn, "close_code", None) is not None:
+            return True
+        return False
+
     async def _watchdog_loop(self) -> None:
-        """Periodically check for stale WS connection and restart if needed."""
+        """Periodically check for stale WS connection and FULL restart if needed.
+
+        Hermes pattern: don't rely on SDK auto_reconnect.
+        Kill the entire WS thread + Client, then create brand new ones.
+        Also detects when the WS thread has exited (connection lost).
+        """
         while self._running:
             await asyncio.sleep(60)
             if not self._running:
                 break
-            if self._should_restart_ws():
-                log.warning("[Feishu] Watchdog: no events for 5m, restarting WS")
+
+            # Check 1: WS thread died (connection lost, start() returned)
+            ws_thread_dead = (
+                self._ws_future is not None
+                and self._ws_future.done()
+            )
+
+            # Check 2: lark-oapi receive task died but Client.start() is still blocked
+            ws_connection_lost = self._ws_connection_lost()
+
+            # Check 3: No events for threshold period
+            stale = self._should_restart_ws()
+
+            if ws_thread_dead or ws_connection_lost or stale:
+                if ws_thread_dead:
+                    reason = "WS thread exited"
+                elif ws_connection_lost:
+                    reason = "WS connection lost"
+                else:
+                    reason = "no events for 5m"
+                log.warning("[Feishu] Watchdog: %s — full restart (hermes pattern)", reason)
                 try:
-                    await self.disconnect()
+                    # Kill everything
+                    await self._kill_ws()
+                    # Brief pause before reconnecting
+                    await asyncio.sleep(2)
+                    # Brand new Client + thread
                     await self._start_websocket()
                     self._running = True
                     self._last_event_time = time.monotonic()
+                    log.info("[Feishu] Watchdog: reconnected successfully")
                 except Exception as exc:
                     log.error("[Feishu] Watchdog restart failed: %s", exc)
+                    # Wait before next attempt
+                    await asyncio.sleep(30)
+
+    async def _kill_ws(self) -> None:
+        """Kill WS client and thread completely (hermes _disable_websocket_auto_reconnect pattern)."""
+        ws_client = self._ws_client
+        ws_loop = self._ws_loop
+
+        if ws_client is not None:
+            try:
+                setattr(ws_client, "_auto_reconnect", False)
+            except Exception:
+                pass
+
+            # lark-oapi keeps its websocket connection bound to the WS thread loop.
+            # Do not await conn.close() directly on the gateway loop; that is the
+            # exact cross-loop failure mode seen in gateway.log.  If the WS loop is
+            # still alive, schedule close there; otherwise just drop the client and
+            # let watchdog create a fresh thread/client.
+            conn = getattr(ws_client, "_conn", None)
+            if conn and ws_loop is not None and not ws_loop.is_closed():
+                try:
+                    close_result = conn.close()
+                    if asyncio.iscoroutine(close_result):
+                        close_future = asyncio.run_coroutine_threadsafe(close_result, ws_loop)
+                        await asyncio.wait_for(asyncio.wrap_future(close_future), timeout=3)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            self._ws_client = None
+            self._ws_loop = None
+            self._ws_started_time = 0
+
+        if self._ws_future is not None:
+            self._ws_future.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(self._ws_future), timeout=5)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._ws_future = None
 
     # -------------------------------------------------------------------------
     # Bot identity hydration (hermes-agent _hydrate_bot_identity)
@@ -381,6 +586,15 @@ class FeishuChannelAdapter(BaseChannelAdapter):
     # -------------------------------------------------------------------------
 
     async def _start_websocket(self) -> None:
+        # lark-oapi's official WS client drops MessageType.CARD frames by default,
+        # but our full _handle_data_frame monkey patch is risky and has been seen
+        # to break normal message delivery.  Keep it opt-in until the CARD patch is
+        # proven safe against text EVENT delivery.
+        if _feishu_card_ws_patch_enabled():
+            _patch_lark_oapi_card_handling()
+        else:
+            log.info("[Feishu] CARD WS monkey patch disabled; set MARNEO_FEISHU_ENABLE_CARD_WS_PATCH=1 to enable")
+
         import lark_oapi as lark
 
         lark_domain = lark.LARK_DOMAIN if self._domain == "lark" else lark.FEISHU_DOMAIN
@@ -397,16 +611,19 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             .register_p2_im_message_reaction_deleted_v1(_noop)
             .register_p2_im_chat_member_bot_added_v1(_noop)
             .register_p2_im_chat_member_bot_deleted_v1(_noop)
+            .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(_noop)
             .register_p2_application_application_app_version_publish_apply_v6(_noop)
             .register_p2_application_application_app_version_publish_revoke_v6(_noop)
             .build()
         )
 
         # Callback to receive the WS client created inside the thread
-        def _on_ws_ready(client: Any) -> None:
+        def _on_ws_ready(client: Any, loop: asyncio.AbstractEventLoop) -> None:
             self._ws_client = client
+            self._ws_loop = loop
 
         main_loop = asyncio.get_running_loop()
+        self._ws_started_time = time.monotonic()
         self._ws_future = main_loop.run_in_executor(
             None,
             _run_feishu_ws_client,
@@ -987,26 +1204,107 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         """Route card button clicks — resolve ask_user questions or dispatch as synthetic text."""
         try:
             from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
-            action = getattr(data, "action", None) or {}
+            # lark-oapi passes a P2CardActionTrigger wrapper whose real payload
+            # is in `.event`; older tests / adapters may pass the event payload
+            # directly.  Support both shapes.
+            event = getattr(data, "event", None) or data
+            action = getattr(event, "action", None) or {}
             value = getattr(action, "value", {}) or {}
-            operator = getattr(data, "operator", None)
+            if value is None:
+                value = {}
+            operator = getattr(event, "operator", None)
             user_id = getattr(operator, "open_id", "") if operator else ""
-            chat_id = getattr(data, "open_chat_id", "") or ""
-            msg_id = getattr(data, "open_message_id", "") or ""
+            card_context = getattr(event, "context", None)
+            chat_id = (
+                getattr(event, "open_chat_id", "")
+                or getattr(card_context, "open_chat_id", "")
+                or ""
+            )
+            msg_id = (
+                getattr(event, "open_message_id", "")
+                or getattr(card_context, "open_message_id", "")
+                or ""
+            )
 
             # ── ask_user question resolution ────────────────────────────────
-            marneo_question_id = value.get("marneo_question_id", "") if isinstance(value, dict) else ""
-            if marneo_question_id:
-                answer = value.get("answer", "")
+            if isinstance(value, dict) and value.get("marneo_question_id"):
+                # Legacy button cards kept the question id and answer in value.
+                marneo_question_id = str(value.get("marneo_question_id") or "")
+                answer = str(value.get("answer", ""))
                 from marneo.gateway.pending_questions import pending_question_store
                 resolved = pending_question_store.resolve(marneo_question_id, answer)
                 if resolved:
-                    log.info("[Feishu] Card action resolved question %s: %s",
-                             marneo_question_id, answer[:60])
+                    log.info("[Feishu] Card action resolved legacy question %s", marneo_question_id)
                     resp = P2CardActionTriggerResponse()
                     resp.toast = {"type": "info", "content": "已收到回复"}
                     return resp
-                # Question not found (expired/already resolved) — fall through
+
+            # Current ask_user cards are Feishu form-submit cards.  Their submit
+            # button name is ask_user_submit_<question_id>; field values arrive in
+            # action.form_value.  Some SDK versions omit button name, so fall back
+            # to the single pending question in this chat.
+            from marneo.gateway.pending_questions import (
+                ACTION_SUBMIT,
+                SUBMIT_BUTTON_PREFIX,
+                find_question_by_chat,
+                get_input_field_name,
+                get_select_field_name,
+                pending_question_store,
+                read_form_multi_select,
+                read_form_text_field,
+            )
+
+            action_name = str(getattr(action, "name", "") or "")
+            form_value = getattr(action, "form_value", {}) or {}
+            if isinstance(form_value, str):
+                try:
+                    form_value = json.loads(form_value)
+                except Exception:
+                    form_value = {}
+            if not isinstance(form_value, dict):
+                form_value = {}
+
+            is_submit = action_name.startswith(SUBMIT_BUTTON_PREFIX) or action_name == ACTION_SUBMIT
+            if is_submit or form_value:
+                question_id = ""
+                if action_name.startswith(SUBMIT_BUTTON_PREFIX):
+                    question_id = action_name[len(SUBMIT_BUTTON_PREFIX):]
+                ctx = None
+                if question_id:
+                    from marneo.gateway.pending_questions import get_pending_question
+                    ctx = get_pending_question(question_id)
+                if ctx is None:
+                    ctx = find_question_by_chat(self._app_id, chat_id)
+                if ctx is not None:
+                    answers: dict[str, str] = {}
+                    for i, q in enumerate(ctx.questions or []):
+                        question_text = str(q.get("question") or q.get("header") or f"问题 {i + 1}")
+                        if q.get("options"):
+                            selected = read_form_multi_select(form_value, get_select_field_name(i))
+                            answers[question_text] = ", ".join(selected) if selected else "(no answer)"
+                        else:
+                            answers[question_text] = read_form_text_field(form_value, get_input_field_name(i)) or "(no answer)"
+                    pending_question_store.resolve(ctx.question_id, answers)
+                    log.info("[Feishu] Card action resolved question %s", ctx.question_id)
+                    resp = P2CardActionTriggerResponse()
+                    resp.toast = {"type": "info", "content": "已收到回复"}
+                    return resp
+
+                # It was clearly an ask_user form submit, but no live pending
+                # context exists (expired/already answered, or malformed context).
+                # Do not fall through to generic command dispatch; that creates
+                # a bogus empty-chat message and can trigger LLM work.
+                log.info(
+                    "[Feishu] Card action submit ignored: no pending question "
+                    "(action=%s chat=%s msg=%s form_keys=%s)",
+                    action_name or "—",
+                    chat_id or "—",
+                    msg_id or "—",
+                    sorted(form_value.keys()),
+                )
+                resp = P2CardActionTriggerResponse()
+                resp.toast = {"type": "warning", "content": "该问题已过期或已被回答"}
+                return resp
 
             # ── Existing behavior: dispatch as synthetic text ────────────────
             cmd = value.get("command", str(value)) if isinstance(value, dict) else str(value)
@@ -1043,7 +1341,14 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         """
         # Set ask_user context so the tool can send cards to this chat
         from marneo.tools.core.ask_user import ask_user_ctx, AskUserContext
-        ctx_token = ask_user_ctx.set(AskUserContext(chat_id=msg.chat_id, adapter=self))
+        ctx_token = ask_user_ctx.set(AskUserContext(
+            chat_id=msg.chat_id,
+            adapter=self,
+            sender_open_id=msg.user_id,
+            msg_id=msg.msg_id,
+            chat_type=msg.chat_type,
+            thread_id=msg.context_token,
+        ))
 
         # Check for pending text-reply questions before normal processing
         from marneo.gateway.pending_questions import pending_question_store
@@ -1250,19 +1555,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
     async def disconnect(self) -> None:
         self._running = False
-        # Cancel the executor future — the WS Client has no stop() method,
-        # so we close the underlying websocket connection directly.
-        if self._ws_client:
-            conn = getattr(self._ws_client, "_conn", None)
-            if conn:
-                try:
-                    await asyncio.wait_for(conn.close(), timeout=3)
-                except Exception:
-                    pass
-            self._ws_client = None
-        if self._ws_future:
-            self._ws_future.cancel()
-            self._ws_future = None
+        await self._kill_ws()
         log.info("[Feishu] Disconnected (employee=%s)", self._employee_name or "—")
 
     # -------------------------------------------------------------------------

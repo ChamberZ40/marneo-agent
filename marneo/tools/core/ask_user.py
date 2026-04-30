@@ -537,8 +537,8 @@ async def send_card_by_card_id(
 async def update_card(adapter: Any, card_id: str, card: dict, sequence: int) -> bool:
     """Update a card entity via Card Kit API.
 
-    PATCH /cardkit/v1/cards/{card_id}
-    Matches openclaw updateCardKitCard().
+    PUT /cardkit/v1/cards/{card_id}
+    Matches lark-oapi UpdateCardRequest / openclaw updateCardKitCard().
     """
     import httpx
 
@@ -551,19 +551,22 @@ async def update_card(adapter: Any, card_id: str, card: dict, sequence: int) -> 
     try:
         token = await _get_tenant_token(adapter)
 
-        # openclaw uses SDK: client.cardkit.v1.card.update(...)
-        # We use raw HTTP: PATCH /cardkit/v1/cards/{card_id}
+        # lark-oapi UpdateCardRequest uses PUT /cardkit/v1/cards/{card_id}.
+        # PATCH returns 404 on Feishu and leaves expired/answered cards visually active.
         payload = json.dumps({
-            "card": json.dumps({
+            # UpdateCardRequestBody.card is a Card object, not a JSON string.
+            # Feishu rejects the stringified form with:
+            #   Invalid parameter type in json: Card
+            "card": {
                 "type": "card_json",
                 "data": json.dumps(card, ensure_ascii=False),
-            }, ensure_ascii=False),
+            },
             "sequence": sequence,
             "uuid": f"c_{card_id}_{sequence}",
         }, ensure_ascii=False)
 
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.patch(
+            resp = await client.put(
                 f"{base_url}/cardkit/v1/cards/{card_id}",
                 headers={
                     "Authorization": f"Bearer {token}",
