@@ -82,15 +82,50 @@ Marneo 当前的产品重点是：先把 Feishu/Lark 这一个 channel 深耕打
 
 ### 1. 安装
 
+推荐用一键安装脚本。它会仿照 Hermes Agent 的安装方式，把代码安装到 `~/.marneo/marneo-agent`，创建独立 Python venv，并把 `marneo` 命令链接到 `~/.local/bin/marneo`。
+
 ```bash
-git clone git@github.com:ChamberZ40/marneo-agent.git
-cd marneo-agent
-python3 -m pip install -e .
+curl -fsSL https://raw.githubusercontent.com/ChamberZ40/marneo-agent/main/scripts/install.sh | bash
+```
+
+如果只想安装，不自动进入配置向导：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChamberZ40/marneo-agent/main/scripts/install.sh | bash -s -- --skip-setup
+```
+
+常用环境变量：
+
+```bash
+MARNEO_HOME=~/.marneo              # 数据与配置目录
+MARNEO_INSTALL_DIR=~/.marneo/marneo-agent  # 代码安装目录
+```
+
+安装完成后，继续运行：
+
+```bash
+marneo setup
+marneo hire
+```
+
+本地命令行使用：
+
+```bash
+marneo work
+```
+
+飞书使用：
+
+```bash
+marneo setup feishu
+marneo gateway start
 ```
 
 开发环境：
 
 ```bash
+git clone git@github.com:ChamberZ40/marneo-agent.git
+cd marneo-agent
 python3 -m pip install -e '.[dev]'
 ```
 
@@ -421,9 +456,9 @@ api_key
 app_secret
 access_token
 refresh_token
-ticket=
-access_key=
-Authorization: Bearer
+Feishu ticket
+Feishu access key
+Authorization: Bearer <token>
 ```
 
 本仓库应该只提交示例配置和脱敏文档，不提交真实凭证。
