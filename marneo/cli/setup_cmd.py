@@ -95,6 +95,25 @@ def _mask_secret(value: str) -> str:
     return f"{value[:4]}…{value[-4:]}"
 
 
+def _build_local_provider_from_options(
+    model: str | None = None,
+    base_url: str | None = None,
+):
+    """Build a loopback-only Ollama/OpenAI-compatible provider for private mode."""
+    from marneo.core.config import ProviderConfig, is_local_provider_url
+
+    final_base_url = base_url or "http://localhost:11434/v1"
+    if not is_local_provider_url(final_base_url):
+        raise ValueError("本地-only/private 模式只允许 localhost/loopback Provider URL")
+    return ProviderConfig(
+        id="ollama",
+        base_url=final_base_url,
+        api_key="ollama",
+        model=model or "llama3.3",
+        protocol="openai-compatible",
+    )
+
+
 def _build_provider_from_options(
     provider_id: str,
     api_key: str | None,
@@ -117,6 +136,8 @@ def _build_provider_from_options(
     final_protocol = protocol or str(selected.get("protocol", "")) or _detect_protocol(final_base_url)
     final_model = model or (selected.get("models") or [""])[0]
     final_api_key = api_key or (_api_key_from_env(provider_id) if use_env else None)
+    if not final_api_key and provider_id == "ollama":
+        final_api_key = "ollama"
     if not final_api_key:
         raise ValueError("API key is required")
 
@@ -158,6 +179,15 @@ def _feishu_next_steps(employee_name: str | None = None) -> str:
     )
 
 
+def _local_cli_next_steps() -> str:
+    return (
+        "本地 CLI 下一步：\n"
+        "  1. 创建/确认数字员工 → marneo hire\n"
+        "  2. 本地命令行对话 → marneo work\n"
+        "  3. 本地-only/private 模式下，外联工具会被禁用，LLM 应使用 Ollama/localhost"
+    )
+
+
 def _choose_existing_provider_action() -> str:
     from marneo.tui.select_ui import radiolist
 
@@ -179,6 +209,20 @@ def setup_feishu(
 ) -> None:
     """新增/配置员工专属飞书 Bot，并形成 feishu:<员工名> channel。"""
     _run_feishu_setup(employee)
+
+
+@setup_app.command("local")
+def setup_local(
+    model: str = typer.Option("llama3.3", "--model", "-m", help="本地模型名，例如 llama3.3 / qwen2.5-coder:7b"),
+    base_url: str = typer.Option("http://localhost:11434/v1", "--base-url", help="本地 OpenAI-compatible Provider URL"),
+) -> None:
+    """配置本地-only/private 模式，默认使用 Ollama/localhost。"""
+    provider = _build_local_provider_from_options(model=model, base_url=base_url)
+    from marneo.core.config import save_config
+
+    path = save_config(provider, local_only=True)
+    console.print(f"[green]✓ 本地-only/private 配置已保存 → {path}[/green]")
+    console.print(Panel(_local_cli_next_steps(), border_style="#00FFCC", padding=(1, 2)))
 
 
 def _run_feishu_setup(employee_name: str | None = None) -> None:
@@ -254,6 +298,8 @@ def _run_setup() -> None:
             f"  API Key{f' ({key_hint})' if key_hint else ''}: ",
             is_password=True,
         ).strip()
+        if not api_key and selected["id"] == "ollama":
+            api_key = "ollama"
         if not api_key:
             console.print("[yellow]已跳过。[/yellow]")
             return
@@ -276,7 +322,7 @@ def _run_setup() -> None:
         model=model,
         protocol=protocol,
     )
-    path = save_config(provider)
+    path = save_config(provider, local_only=(selected["id"] == "ollama"))
 
     console.print("\n[dim]测试连接...[/dim]")
     _test_provider(provider)

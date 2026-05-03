@@ -123,8 +123,10 @@ def _register_subcommands() -> None:
     from marneo.cli.gateway_cmd import gateway_app
     from marneo.cli.team_cmd import team_app
     from marneo.cli.memory_cmd import memory_app
+    from marneo.cli.web_cmd import web_app
     app.add_typer(setup_app, name="setup")
     app.add_typer(work_app, name="work")
+    app.add_typer(web_app, name="web")
     app.add_typer(hire_app, name="hire")
     app.add_typer(employees_app, name="employees")
     app.add_typer(report_app, name="report")

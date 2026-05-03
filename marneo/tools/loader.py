@@ -2,22 +2,44 @@
 """Import all tool modules to trigger self-registration in the registry."""
 from __future__ import annotations
 
+import importlib
 import logging
+import sys
 
 log = logging.getLogger(__name__)
 
 
+def _load_tool_module(module_name: str) -> None:
+    """Import or reload a self-registering tool module.
+
+    Tests may clear the global registry after a module was already imported;
+    reload makes load_all_tools() idempotent and restores registrations.
+    """
+    if module_name in sys.modules:
+        importlib.reload(sys.modules[module_name])
+    else:
+        importlib.import_module(module_name)
+
+
 def load_all_tools() -> None:
     """Import every tool module and discover plugins. Call once at startup."""
-    from marneo.tools.core import files        # noqa: F401
-    from marneo.tools.core import bash         # noqa: F401
-    from marneo.tools.core import web          # noqa: F401
-    from marneo.tools.core import lark_cli     # noqa: F401
-    from marneo.tools.core import feishu_tools  # noqa: F401
-    from marneo.tools.core import ask_user     # noqa: F401
+    from marneo.core.config import is_local_only_mode
 
-    # --- Manifest-first plugin discovery ---
-    _load_plugins()
+    local_only = is_local_only_mode()
+
+    _load_tool_module("marneo.tools.core.files")
+    _load_tool_module("marneo.tools.core.bash")
+
+    if not local_only:
+        _load_tool_module("marneo.tools.core.web")
+        _load_tool_module("marneo.tools.core.lark_cli")
+        _load_tool_module("marneo.tools.core.feishu_tools")
+        _load_tool_module("marneo.tools.core.ask_user")
+
+        # --- Manifest-first plugin discovery ---
+        _load_plugins()
+    else:
+        log.info("[Tools] local-only/private mode enabled; external network tools are disabled")
 
 
 def _load_plugins() -> None:

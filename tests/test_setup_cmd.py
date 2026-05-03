@@ -1,8 +1,10 @@
 from marneo.cli.setup_cmd import (
     _api_key_from_env,
+    _build_local_provider_from_options,
     _build_provider_from_options,
     _existing_provider_choices,
     _feishu_next_steps,
+    _local_cli_next_steps,
     _mask_secret,
 )
 
@@ -71,3 +73,43 @@ def test_feishu_next_steps_make_employee_channel_explicit():
     assert "feishu:laoqi" in text
     assert "marneo setup feishu --employee laoqi" in text
     assert "marneo gateway restart" in text
+
+
+def test_ollama_provider_does_not_require_real_api_key():
+    provider = _build_provider_from_options(
+        provider_id="ollama",
+        api_key=None,
+        model="qwen2.5-coder:7b",
+        base_url=None,
+        protocol=None,
+        use_env=False,
+    )
+
+    assert provider.id == "ollama"
+    assert provider.base_url == "http://localhost:11434/v1"
+    assert provider.api_key == "ollama"
+    assert provider.model == "qwen2.5-coder:7b"
+
+
+def test_local_cli_next_steps_prefer_work_not_web():
+    text = _local_cli_next_steps()
+
+    assert "marneo work" in text
+    assert "marneo gateway" not in text
+    assert "marneo web" not in text
+
+
+def test_build_local_provider_from_options_enforces_loopback():
+    provider = _build_local_provider_from_options(model="llama3.3", base_url="http://127.0.0.1:11434/v1")
+
+    assert provider.id == "ollama"
+    assert provider.base_url == "http://127.0.0.1:11434/v1"
+    assert provider.api_key == "ollama"
+    assert provider.model == "llama3.3"
+
+    try:
+        _build_local_provider_from_options(model="bad", base_url="https://openrouter.ai/api/v1")
+    except ValueError as exc:
+        assert "local" in str(exc).lower() or "本地" in str(exc)
+    else:
+        raise AssertionError("local setup must reject non-loopback provider URLs")

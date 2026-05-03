@@ -14,6 +14,14 @@ from typing import Any
 from marneo.tools.registry import registry, tool_result, tool_error
 
 
+def _local_only_error(tool_name: str) -> str | None:
+    from marneo.core.config import is_local_only_mode
+
+    if is_local_only_mode():
+        return tool_error(f"{tool_name} is disabled in local-only/private mode")
+    return None
+
+
 def _build_mention_text(mentions: list[dict], text: str = "") -> str:
     """Build Feishu text message with @mention tags (openclaw format).
 
@@ -34,6 +42,9 @@ def _build_mention_text(mentions: list[dict], text: str = "") -> str:
 
 def feishu_send_mention(args: dict[str, Any], **kw: Any) -> str:
     """Send a Feishu message with @mention to one or more users."""
+    blocked = _local_only_error("feishu_send_mention")
+    if blocked is not None:
+        return blocked
     chat_id = args.get("chat_id", "").strip()
     text = args.get("text", "").strip()
     mentions = args.get("mentions", [])  # list of {"open_id": "ou_xxx", "name": "张三"}
@@ -112,6 +123,9 @@ def feishu_send_mention(args: dict[str, Any], **kw: Any) -> str:
 
 def feishu_search_user(args: dict[str, Any], **kw: Any) -> str:
     """Search Feishu users — try group member list first, then contact search."""
+    blocked = _local_only_error("feishu_search_user")
+    if blocked is not None:
+        return blocked
     query = args.get("query", "").strip()
     chat_id = args.get("chat_id", "").strip()
     if not query:
@@ -183,6 +197,7 @@ registry.register(
     },
     handler=feishu_send_mention,
     emoji="📢",
+    network_scope="external",
 )
 
 registry.register(
@@ -202,11 +217,15 @@ registry.register(
     },
     handler=feishu_search_user,
     emoji="🔍",
+    network_scope="external",
 )
 
 
 def feishu_create_doc(args: dict[str, Any], **kw: Any) -> str:
     """Create a Feishu document — delegates to lark_cli."""
+    blocked = _local_only_error("feishu_create_doc")
+    if blocked is not None:
+        return blocked
     title = args.get("title", "").strip()
     content = args.get("content", "").strip()
     if not title and not content:
@@ -237,6 +256,7 @@ registry.register(
     },
     handler=feishu_create_doc,
     emoji="📄",
+    network_scope="external",
 )
 
 
@@ -283,6 +303,9 @@ def _build_client(app_id: str, app_secret: str, domain: str) -> Any:
 
 def feishu_send_file(args: dict[str, Any], **kw: Any) -> str:
     """Upload a local file/image to Feishu and send it to a chat."""
+    blocked = _local_only_error("feishu_send_file")
+    if blocked is not None:
+        return blocked
     file_path = args.get("file_path", "").strip()
     chat_id = args.get("chat_id", "").strip()
     file_name = args.get("file_name", "").strip()
@@ -447,4 +470,5 @@ registry.register(
     },
     handler=feishu_send_file,
     emoji="📎",
+    network_scope="external",
 )

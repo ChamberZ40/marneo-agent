@@ -59,6 +59,11 @@ def _ensure_lark_cli_configured(app_id: str, app_secret: str, brand: str) -> str
 
 def lark_cli(args: dict[str, Any], **kw: Any) -> str:
     """Execute a lark-cli command using marneo's Feishu credentials."""
+    from marneo.core.config import is_local_only_mode
+
+    if is_local_only_mode():
+        return tool_error("lark_cli is disabled in local-only/private mode")
+
     command = args.get("command", "").strip()
     timeout = int(args.get("timeout", _DEFAULT_TIMEOUT))
 
@@ -155,4 +160,5 @@ registry.register(
     handler=lark_cli,
     emoji="🪶",
     check_fn=lambda: bool(shutil.which("lark-cli")),
+    network_scope="external",
 )

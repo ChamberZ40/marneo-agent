@@ -780,4 +780,5 @@ registry.register(
     handler=ask_user_handler,
     is_async=True,
     emoji="",
+    network_scope="external",
 )

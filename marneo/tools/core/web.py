@@ -31,6 +31,11 @@ def _safe_url(url: str) -> bool:
 
 
 def web_fetch(args: dict[str, Any], **kw: Any) -> str:
+    from marneo.core.config import is_local_only_mode
+
+    if is_local_only_mode():
+        return tool_error("web_fetch is disabled in local-only/private mode")
+
     url = args.get("url", "").strip()
     if not url:
         return tool_error("url is required")
@@ -61,6 +66,11 @@ def web_fetch(args: dict[str, Any], **kw: Any) -> str:
 
 
 def web_search(args: dict[str, Any], **kw: Any) -> str:
+    from marneo.core.config import is_local_only_mode
+
+    if is_local_only_mode():
+        return tool_error("web_search is disabled in local-only/private mode")
+
     query = args.get("query", "").strip()
     try:
         limit = max(1, min(int(args.get("limit", 5)), 10))
@@ -115,6 +125,7 @@ registry.register(
     handler=web_fetch,
     emoji="🌐",
     max_result_chars=60_000,
+    network_scope="external",
 )
 
 registry.register(
@@ -135,4 +146,5 @@ registry.register(
     handler=web_search,
     emoji="🔍",
     max_result_chars=20_000,
+    network_scope="external",
 )

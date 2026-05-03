@@ -78,8 +78,14 @@ class ProviderPool:
                     provider_id=fb.get("id", f"fallback-{len(self._providers)}"),
                 ))
 
-        # Env var fallbacks (if nothing from config)
-        if not self._providers:
+        # Local-only/private mode must never silently fall back to remote env providers.
+        local_only = cfg.privacy.local_only
+        if local_only:
+            from marneo.core.config import is_local_provider_url
+            self._providers = [p for p in self._providers if is_local_provider_url(p.base_url)]
+
+        # Env var fallbacks (if nothing from config). Disabled in local-only mode.
+        if not self._providers and not local_only:
             anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
             openai_key = os.environ.get("OPENAI_API_KEY", "")
             if anthropic_key:
@@ -106,6 +112,9 @@ class ProviderPool:
         """Return the best available provider. Raises ValueError if none available."""
         self._init_providers()
         if not self._providers:
+            cfg = load_config()
+            if cfg.privacy.local_only:
+                raise ValueError("本地-only/private 模式需要配置本地 LLM Provider（例如 Ollama / localhost OpenAI-compatible）。请运行: marneo setup")
             raise ValueError("未配置 Provider。请先运行: marneo setup")
 
         now = time.time()

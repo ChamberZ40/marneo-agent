@@ -57,3 +57,16 @@ def test_lark_cli_appends_as_bot():
         call_args = mock_run.call_args[0][0]
         assert "--as" in call_args
         assert "bot" in call_args
+
+
+def test_lark_cli_refuses_in_local_only_mode():
+    from marneo.core.paths import get_config_path
+
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("privacy:\n  local_only: true\n", encoding="utf-8")
+
+    result = json.loads(lark_cli({"command": "calendar +agenda"}))
+
+    assert "error" in result
+    assert "local-only" in result["error"]

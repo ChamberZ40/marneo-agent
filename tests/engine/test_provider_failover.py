@@ -57,3 +57,22 @@ class TestProviderPool:
         # Should still return primary (only option)
         result = pool.resolve()
         assert result.provider_id == "primary"
+
+
+def test_local_only_mode_ignores_remote_env_fallbacks(monkeypatch):
+    from marneo.core.paths import get_config_path
+    from marneo.engine.provider import ProviderPool
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-env")
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("privacy:\n  local_only: true\n", encoding="utf-8")
+
+    pool = ProviderPool()
+
+    try:
+        pool.resolve()
+    except ValueError as exc:
+        assert "local" in str(exc).lower() or "本地" in str(exc)
+    else:
+        raise AssertionError("local-only mode must not use remote env provider fallbacks")

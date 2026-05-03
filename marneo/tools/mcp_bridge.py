@@ -599,6 +599,7 @@ class McpBridge:
                 handler=handler,
                 is_async=False,
                 emoji="",
+                network_scope="external",
             )
             registered += 1
             log.debug(

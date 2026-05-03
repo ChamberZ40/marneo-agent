@@ -30,6 +30,7 @@ class ToolEntry:
     is_async: bool = False
     emoji: str = ""
     max_result_chars: Optional[int] = None
+    network_scope: str = "local"
 
 
 class ToolRegistry:
@@ -47,6 +48,7 @@ class ToolRegistry:
         is_async: bool = False,
         emoji: str = "",
         max_result_chars: Optional[int] = None,
+        network_scope: str = "local",
     ) -> None:
         with self._lock:
             self._tools[name] = ToolEntry(
@@ -58,6 +60,7 @@ class ToolRegistry:
                 is_async=is_async,
                 emoji=emoji,
                 max_result_chars=max_result_chars,
+                network_scope=network_scope,
             )
 
     def get_entry(self, name: str) -> Optional[ToolEntry]:
@@ -73,7 +76,15 @@ class ToolRegistry:
             entries = [e for e in entries if e.name in names]
 
         result = []
+        local_only = False
+        try:
+            from marneo.core.config import is_local_only_mode
+            local_only = is_local_only_mode()
+        except Exception as exc:
+            log.debug("[Tools] local-only check failed: %s", exc)
         for entry in entries:
+            if local_only and entry.network_scope != "local":
+                continue
             if entry.check_fn is not None:
                 try:
                     if not entry.check_fn():
@@ -84,10 +95,25 @@ class ToolRegistry:
             result.append({"type": "function", "function": {**entry.schema, "name": entry.name}})
         return result
 
+    def _blocked_by_local_only(self, entry: ToolEntry) -> str | None:
+        """Return an error JSON if local-only mode blocks this tool."""
+        try:
+            from marneo.core.config import is_local_only_mode
+            local_only = is_local_only_mode()
+        except Exception as exc:
+            log.debug("[Tools] local-only check failed: %s", exc)
+            local_only = False
+        if local_only and entry.network_scope != "local":
+            return tool_error(f"{entry.name} is disabled in local-only/private mode")
+        return None
+
     def dispatch(self, name: str, args: dict[str, Any], **kwargs: Any) -> str:
         entry = self.get_entry(name)
         if entry is None:
             return tool_error(f"Unknown tool: {name}")
+        blocked = self._blocked_by_local_only(entry)
+        if blocked is not None:
+            return blocked
         try:
             if entry.is_async:
                 result = _run_async(lambda: entry.handler(args, **kwargs))
@@ -112,6 +138,9 @@ class ToolRegistry:
         entry = self.get_entry(name)
         if entry is None:
             return tool_error(f"Unknown tool: {name}")
+        blocked = self._blocked_by_local_only(entry)
+        if blocked is not None:
+            return blocked
         try:
             if entry.is_async:
                 result = await entry.handler(args, **kwargs)
