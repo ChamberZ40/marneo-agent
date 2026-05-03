@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Local Web Console (`marneo web`)**: loopback-only browser console for local Marneo status, employees, projects, gateway health, and redacted logs. Defaults to `127.0.0.1:8787`; LAN binding requires explicit `--allow-lan`.
+- **Privacy / local-only coverage**: documents and tests `marneo setup local`, `privacy.local_only: true`, local Provider enforcement, and external-tool gating.
+
+### Changed
+- **README is now English-first**: GitHub landing page opens with the English product overview, with a direct jump to the Chinese version.
+- **README product onboarding**: documents one-line install, local CLI (`marneo work`), local Web Console (`marneo web`), Feishu-first multi-bot setup, and pre-commit safety checks.
+
 ## [0.2.0] - 2026-04-28
 
 ### Changed (BREAKING)
