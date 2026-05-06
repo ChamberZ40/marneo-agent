@@ -196,6 +196,23 @@ def get_pending_question(question_id: str) -> Optional[PendingQuestionContext]:
         return _pending_questions.get(question_id)
 
 
+def pending_questions_snapshot(account_id: str = "") -> dict[str, Any]:
+    """Return non-sensitive pending-question queue counters for health/debugging."""
+    with _lock:
+        pending = [
+            ctx for ctx in _pending_questions.values()
+            if not ctx.submitted and (not account_id or ctx.account_id == account_id)
+        ]
+        by_chat: dict[str, int] = {}
+        for ctx in pending:
+            key = _build_chat_key(ctx.account_id, ctx.chat_id)
+            by_chat[key] = by_chat.get(key, 0) + 1
+        return {
+            "total": len(pending),
+            "by_chat": dict(sorted(by_chat.items())),
+        }
+
+
 def find_question_by_chat(account_id: str, chat_id: str) -> Optional[PendingQuestionContext]:
     """Chat-scoped fallback: find the single non-submitted pending question for a chat.
 

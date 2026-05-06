@@ -184,6 +184,38 @@ async def test_kill_ws_does_not_close_ws_connection_on_gateway_loop():
     assert adapter._ws_loop is None
 
 
+def test_ws_restart_backoff_increases_caps_and_resets_after_success():
+    adapter = FeishuChannelAdapter(MagicMock(), employee_name="test")
+
+    assert adapter._ws_restart_backoff_delay() == 2.0
+    adapter._record_ws_restart_failure()
+    assert adapter._ws_restart_backoff_delay() == 4.0
+    adapter._record_ws_restart_failure()
+    assert adapter._ws_restart_backoff_delay() == 8.0
+
+    adapter._ws_restart_failures = 99
+    assert adapter._ws_restart_backoff_delay() == adapter._ws_restart_backoff_max
+
+    adapter._record_ws_restart_success("WS connection lost")
+    assert adapter._ws_restart_failures == 0
+    assert adapter._ws_restart_stats["successes"] == 1
+    assert adapter._ws_restart_stats["last_reason"] == "WS connection lost"
+
+
+def test_ws_restart_status_is_exposed_for_health_without_secrets():
+    adapter = FeishuChannelAdapter(MagicMock(), employee_name="test")
+    adapter._record_ws_restart_failure("boom")
+    adapter._record_ws_restart_failure("boom2")
+
+    status = adapter.ws_restart_status_snapshot()
+
+    assert status["failures"] == 2
+    assert status["attempts"] == 2
+    assert status["last_error"] == "boom2"
+    assert status["next_backoff_seconds"] == 8.0
+    assert "secret" not in str(status).lower()
+
+
 @pytest.mark.asyncio
 async def test_card_action_form_submit_resolves_pending_question_as_synthetic_message():
     """Feishu form-submit cards should use the new pending-question registry."""
@@ -263,3 +295,69 @@ async def test_card_action_form_submit_without_pending_context_does_not_dispatch
     assert response is not None
     assert getattr(response, "toast", None)["type"] == "warning"
     manager.dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_card_action_metrics_track_resolved_and_ignored_submit_paths():
+    from marneo.gateway.pending_questions import (
+        PendingQuestionContext,
+        _by_chat_context,
+        _lock,
+        _pending_questions,
+        store_pending_question,
+    )
+
+    with _lock:
+        _pending_questions.clear()
+        _by_chat_context.clear()
+
+    manager = SimpleNamespace(dispatch=AsyncMock())
+    adapter = FeishuChannelAdapter(manager, employee_name="test")
+    adapter._app_id = "app1"
+    adapter._loop = asyncio.get_running_loop()
+
+    store_pending_question(PendingQuestionContext(
+        question_id="q_metrics",
+        chat_id="chat1",
+        account_id="app1",
+        sender_open_id="ou_user",
+        card_id="",
+        questions=[{"question": "确认执行？", "options": []}],
+        message_id="m1",
+        adapter=adapter,
+    ))
+
+    resolved = SimpleNamespace(event=SimpleNamespace(
+        action=SimpleNamespace(
+            name="ask_user_submit_q_metrics",
+            value={},
+            form_value={"answer_0": "可以"},
+        ),
+        operator=SimpleNamespace(open_id="ou_user_secret_should_not_leak"),
+        context=SimpleNamespace(open_chat_id="chat_secret_should_not_leak", open_message_id="card_msg1"),
+    ))
+    ignored = SimpleNamespace(event=SimpleNamespace(
+        action=SimpleNamespace(
+            name="ask_user_submit_missing",
+            value={},
+            form_value={"answer_0": "late answer"},
+        ),
+        operator=SimpleNamespace(open_id="ou_user_secret_should_not_leak"),
+        context=SimpleNamespace(open_chat_id="chat_secret_should_not_leak", open_message_id="card_msg2"),
+    ))
+
+    adapter._on_card_action(resolved)
+    adapter._on_card_action(ignored)
+    await asyncio.sleep(0.05)
+
+    metrics = adapter.card_action_metrics_snapshot()
+    assert metrics["received"] == 2
+    assert metrics["submit_detected"] == 2
+    assert metrics["form_value_seen"] == 2
+    assert metrics["resolved"] == 1
+    assert metrics["ignored_no_pending"] == 1
+    assert metrics["synthetic_dispatched"] == 0
+    assert metrics["errors"] == 0
+    assert metrics["last_event"]["action_name"] == "ask_user_submit_missing"
+    assert metrics["last_event"]["form_keys"] == ["answer_0"]
+    assert "secret_should_not_leak" not in str(metrics)

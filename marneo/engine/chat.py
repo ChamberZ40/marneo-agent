@@ -16,6 +16,8 @@ log = logging.getLogger(__name__)
 
 _MAX_TEXT_INJECT = 200_000  # 200 KB max for text file inline injection
 _LOOP_DETECT_THRESHOLD = 3  # consecutive identical tool calls before breaking
+_DEFAULT_TOOL_RESULT_CONTEXT_MAX_CHARS = 50_000
+_DEFAULT_CONTEXT_BUDGET_MAX_CHARS = 180_000
 
 
 def _build_content_blocks(
@@ -120,9 +122,52 @@ class ChatSession:
     messages: list[dict[str, Any]] = field(default_factory=list)
     system_prompt: str = ""
     token_tracker: TokenTracker = field(default_factory=TokenTracker)
+    tool_result_context_max_chars: int = _DEFAULT_TOOL_RESULT_CONTEXT_MAX_CHARS
+    context_budget_max_chars: int = _DEFAULT_CONTEXT_BUDGET_MAX_CHARS
 
     def clear(self) -> None:
         self.messages.clear()
+
+    def _message_text(self, message: dict[str, Any]) -> str:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content
+        return str(content)
+
+    def _context_chars(self) -> int:
+        return sum(len(self._message_text(m)) for m in self.messages)
+
+    def _truncate_tool_result_for_context(self, result: Any) -> str:
+        text = result if isinstance(result, str) else str(result)
+        limit = max(0, int(self.tool_result_context_max_chars))
+        if limit <= 0 or len(text) <= limit:
+            return text
+        suffix = f"\n... [tool result truncated: original_chars={len(text)} shown_chars="
+        suffix += f"{max(0, limit - len(suffix) - 1)}]"
+        keep = max(0, limit - len(suffix))
+        return text[:keep] + suffix
+
+    def _prune_context_budget(self) -> None:
+        budget = int(self.context_budget_max_chars or 0)
+        if budget <= 0 or self._context_chars() <= budget:
+            return
+        if len(self.messages) <= 2:
+            return
+
+        recent_keep = min(2, len(self.messages))
+        recent = self.messages[-recent_keep:]
+        older = self.messages[:-recent_keep]
+        omitted = 0
+        while older and sum(len(self._message_text(m)) for m in older + recent) > budget:
+            older.pop(0)
+            omitted += 1
+        if omitted:
+            summary = {
+                "role": "system",
+                "content": f"[context budget: omitted {omitted} older messages to stay under {budget} chars]",
+            }
+            self.messages = [summary] + older + recent
+
 
     async def send(
         self,
@@ -137,6 +182,7 @@ class ChatSession:
             protocol=provider.protocol,
         )
         self.messages.append({"role": "user", "content": content})
+        self._prune_context_budget()
         collected = ""
 
         try:
@@ -197,6 +243,7 @@ class ChatSession:
             tool_calls_this_round: list[dict] = []
 
             # Pass attachments only on the first call
+            self._prune_context_budget()
             call_attachments = attachments if _first_call else None
             async for event in self._send_with_tool_defs(call_text, tool_defs, call_attachments):
                 if event.type == "tool_call":
@@ -251,8 +298,9 @@ class ChatSession:
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": result,
+                    "content": self._truncate_tool_result_for_context(result),
                 })
+                self._prune_context_budget()
 
             call_text = ""  # subsequent iterations: tool results already in history
             _first_call = False

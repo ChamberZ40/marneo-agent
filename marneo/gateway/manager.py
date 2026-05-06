@@ -150,9 +150,91 @@ class GatewayManager:
             except Exception:
                 pass
 
+    @staticmethod
+    def _mask_identifier(value: str, keep: int = 12) -> str:
+        if not value:
+            return ""
+        if len(value) <= keep:
+            return value
+        return value[:keep] + "..."
+
+    def _channel_health_detail(self, platform: str, adapter: BaseChannelAdapter) -> dict[str, Any]:
+        last_event = getattr(adapter, "_last_event_time", 0) or 0
+        ws_future = getattr(adapter, "_ws_future", None)
+        ws_client = getattr(adapter, "_ws_client", None)
+        conn = getattr(ws_client, "_conn", None) if ws_client is not None else None
+        future_done = bool(ws_future.done()) if ws_future is not None and hasattr(ws_future, "done") else None
+        connection_lost = None
+        if hasattr(adapter, "_ws_connection_lost"):
+            try:
+                connection_lost = bool(adapter._ws_connection_lost())  # type: ignore[attr-defined]
+            except Exception:
+                connection_lost = None
+        elif ws_client is not None:
+            connection_lost = conn is None or bool(getattr(conn, "closed", False)) or getattr(conn, "close_code", None) is not None
+
+        detail = {
+            "platform": platform,
+            "employee": getattr(adapter, "_employee_name", "") or None,
+            "running": bool(adapter.is_running),
+            "connection_mode": getattr(adapter, "_connection_mode", None),
+            "domain": getattr(adapter, "_domain", None),
+            "bot_name": getattr(adapter, "_bot_name", "") or None,
+            "bot_open_id": self._mask_identifier(getattr(adapter, "_bot_open_id", "") or ""),
+            "bot_user_id": self._mask_identifier(getattr(adapter, "_bot_user_id", "") or ""),
+            "last_event_seconds_ago": int(time.monotonic() - last_event) if last_event > 0 else None,
+            "pending_inbound": len(getattr(adapter, "_pending_inbound", []) or []),
+            "pending_text_batches": len(getattr(adapter, "_pending_text_batches", {}) or {}),
+            "ws": {
+                "future_done": future_done,
+                "client_present": ws_client is not None,
+                "conn_present": conn is not None,
+                "conn_closed": bool(getattr(conn, "closed", False)) if conn is not None else None,
+                "conn_close_code": getattr(conn, "close_code", None) if conn is not None else None,
+                "connection_lost": connection_lost,
+            },
+        }
+        if hasattr(adapter, "card_action_metrics_snapshot"):
+            try:
+                detail["card_actions"] = adapter.card_action_metrics_snapshot()  # type: ignore[attr-defined]
+            except Exception:
+                detail["card_actions"] = {"error": "unavailable"}
+        if hasattr(adapter, "pending_questions_snapshot"):
+            try:
+                detail["pending_questions"] = adapter.pending_questions_snapshot()  # type: ignore[attr-defined]
+            except Exception:
+                detail["pending_questions"] = {"error": "unavailable"}
+        if hasattr(adapter, "ws_restart_status_snapshot"):
+            try:
+                detail["ws_restart"] = adapter.ws_restart_status_snapshot()  # type: ignore[attr-defined]
+            except Exception:
+                detail["ws_restart"] = {"error": "unavailable"}
+        return detail
+
+    def health_payload(self, start_time: float | None = None) -> dict[str, Any]:
+        """Build the /health JSON payload; kept separate so tests don't need aiohttp."""
+        start_time = start_time or time.time()
+        connected = [p for p, a in self._adapters.items() if a.is_running]
+        last_event = 0
+        for adapter in self._adapters.values():
+            t = getattr(adapter, "_last_event_time", 0) or 0
+            if t > last_event:
+                last_event = t
+        return {
+            "status": "ok",
+            "uptime_seconds": int(time.time() - start_time),
+            "sessions": self._sessions.active_count,
+            "connected_channels": connected,
+            "channels_detail": {
+                platform: self._channel_health_detail(platform, adapter)
+                for platform, adapter in self._adapters.items()
+            },
+            "tools": len(_tool_registry.get_definitions()),
+            "last_event_seconds_ago": int(time.monotonic() - last_event) if last_event > 0 else None,
+        }
+
     async def _start_health_server(self, port: int = 8765) -> None:
         """Start a lightweight HTTP health check server."""
-        import time
         _start_time = time.time()
 
         try:
@@ -160,25 +242,9 @@ class GatewayManager:
 
             async def health(request: web.Request) -> web.Response:
                 import json
-                connected = [p for p, a in self._adapters.items() if a.is_running]
-
-                # Get last event time from adapters (feishu watchdog)
-                last_event = 0
-                for adapter in self._adapters.values():
-                    t = getattr(adapter, "_last_event_time", 0)
-                    if t > last_event:
-                        last_event = t
-
                 return web.Response(
                     content_type="application/json",
-                    text=json.dumps({
-                        "status": "ok",
-                        "uptime_seconds": int(time.time() - _start_time),
-                        "sessions": self._sessions.active_count,
-                        "connected_channels": connected,
-                        "tools": len(_tool_registry.get_definitions()),
-                        "last_event_seconds_ago": int(time.monotonic() - last_event) if last_event > 0 else None,
-                    }),
+                    text=json.dumps(self.health_payload(_start_time), ensure_ascii=False),
                 )
 
             app = web.Application()

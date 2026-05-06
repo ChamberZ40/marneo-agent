@@ -111,6 +111,9 @@ _REACTION_CACHE_SIZE = 1024        # LRU cap for (msg_id → reaction_id)
 _PENDING_INBOUND_MAX = 1000        # cap pending queue; drop oldest beyond
 _PENDING_DRAIN_POLL = 0.25         # seconds between drain loop polls
 _PENDING_DRAIN_MAX_WAIT = 120.0    # give up after 2 min
+_TEXT_BATCH_DELAY_SECONDS = 0.8     # quiet window for rapid text bursts
+_TEXT_BATCH_MAX_MESSAGES = 6        # cap merged text chunks per batch
+_TEXT_BATCH_MAX_CHARS = 12000       # avoid over-large agent inputs
 _REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # withdrawn/missing
 
 
@@ -370,9 +373,75 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         # Reaction tracking: msg_id → reaction_id (for deletion)
         self._processing_reactions: OrderedDict[str, str] = OrderedDict()
 
+        # Text batching: debounce rapid plain-text bursts per chat/user
+        self._text_batch_delay_seconds = _TEXT_BATCH_DELAY_SECONDS
+        self._text_batch_max_messages = _TEXT_BATCH_MAX_MESSAGES
+        self._text_batch_max_chars = _TEXT_BATCH_MAX_CHARS
+        self._pending_text_batches: dict[str, ChannelMessage] = {}
+        self._pending_text_batch_counts: dict[str, int] = {}
+        self._pending_text_batch_tasks: dict[str, asyncio.Task] = {}
+
         # Watchdog: track last event time for stale-connection detection
         self._last_event_time: float = 0
         self._watchdog_task: Optional[asyncio.Task] = None
+        self._ws_restart_backoff_base = 2.0
+        self._ws_restart_backoff_max = 60.0
+        self._ws_restart_failures = 0
+        self._ws_restart_stats: dict[str, Any] = {
+            "attempts": 0,
+            "successes": 0,
+            "failures": 0,
+            "last_reason": "",
+            "last_error": "",
+            "last_attempt_ts": None,
+            "last_success_ts": None,
+        }
+
+        # Card action / pending-question observability counters (non-sensitive)
+        self._card_action_metrics_lock = threading.Lock()
+        self._card_action_metrics: dict[str, Any] = {
+            "received": 0,
+            "submit_detected": 0,
+            "form_value_seen": 0,
+            "resolved": 0,
+            "ignored_no_pending": 0,
+            "synthetic_dispatched": 0,
+            "errors": 0,
+            "last_event": None,
+        }
+
+    def _record_card_action_metric(self, key: str | None = None, *, event: dict[str, Any] | None = None) -> None:
+        with self._card_action_metrics_lock:
+            if key:
+                self._card_action_metrics[key] = int(self._card_action_metrics.get(key, 0)) + 1
+            if event is not None:
+                self._card_action_metrics["last_event"] = event
+
+    def _card_action_event_summary(
+        self,
+        *,
+        action_name: str = "",
+        chat_id: str = "",
+        msg_id: str = "",
+        form_value: dict[str, Any] | None = None,
+        kind: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "kind": kind,
+            "action_name": action_name or "",
+            "chat_present": bool(chat_id),
+            "msg_present": bool(msg_id),
+            "form_keys": sorted((form_value or {}).keys()),
+            "ts": int(time.time()),
+        }
+
+    def card_action_metrics_snapshot(self) -> dict[str, Any]:
+        with self._card_action_metrics_lock:
+            return dict(self._card_action_metrics)
+
+    def pending_questions_snapshot(self) -> dict[str, Any]:
+        from marneo.gateway.pending_questions import pending_questions_snapshot
+        return pending_questions_snapshot(self._app_id)
 
     # -------------------------------------------------------------------------
     # Validation & connect
@@ -412,6 +481,15 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         self._bot_open_id = config.get("bot_open_id", "") or self._bot_open_id
         self._bot_user_id = config.get("bot_user_id", "") or self._bot_user_id
         self._bot_name = config.get("bot_name", "") or self._bot_name
+        self._text_batch_delay_seconds = float(
+            config.get("text_batch_delay_seconds", self._text_batch_delay_seconds)
+        )
+        self._text_batch_max_messages = max(
+            1, int(config.get("text_batch_max_messages", self._text_batch_max_messages))
+        )
+        self._text_batch_max_chars = max(
+            1, int(config.get("text_batch_max_chars", self._text_batch_max_chars))
+        )
         self._loop = asyncio.get_running_loop()
         self._dedup = MessageDeduplicator(self._app_id)
 
@@ -437,6 +515,33 @@ class FeishuChannelAdapter(BaseChannelAdapter):
     # -------------------------------------------------------------------------
     # WS watchdog — restart if no events for threshold period
     # -------------------------------------------------------------------------
+
+    def _ws_restart_backoff_delay(self) -> float:
+        """Current exponential restart backoff delay in seconds."""
+        delay = self._ws_restart_backoff_base * (2 ** max(0, self._ws_restart_failures))
+        return float(min(delay, self._ws_restart_backoff_max))
+
+    def _record_ws_restart_failure(self, error: str = "") -> None:
+        self._ws_restart_failures += 1
+        self._ws_restart_stats["attempts"] = int(self._ws_restart_stats.get("attempts", 0)) + 1
+        self._ws_restart_stats["failures"] = int(self._ws_restart_stats.get("failures", 0)) + 1
+        self._ws_restart_stats["last_error"] = (error or "")[:200]
+        self._ws_restart_stats["last_attempt_ts"] = int(time.time())
+
+    def _record_ws_restart_success(self, reason: str = "") -> None:
+        self._ws_restart_stats["attempts"] = int(self._ws_restart_stats.get("attempts", 0)) + 1
+        self._ws_restart_stats["successes"] = int(self._ws_restart_stats.get("successes", 0)) + 1
+        self._ws_restart_stats["last_reason"] = (reason or "")[:120]
+        self._ws_restart_stats["last_error"] = ""
+        self._ws_restart_stats["last_attempt_ts"] = int(time.time())
+        self._ws_restart_stats["last_success_ts"] = int(time.time())
+        self._ws_restart_failures = 0
+
+    def ws_restart_status_snapshot(self) -> dict[str, Any]:
+        status = dict(self._ws_restart_stats)
+        status["failures"] = self._ws_restart_failures
+        status["next_backoff_seconds"] = self._ws_restart_backoff_delay()
+        return status
 
     def _should_restart_ws(self, threshold: float = 300) -> bool:
         """Check if WS should be restarted due to inactivity (testable sync helper)."""
@@ -504,17 +609,21 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 try:
                     # Kill everything
                     await self._kill_ws()
-                    # Brief pause before reconnecting
-                    await asyncio.sleep(2)
+                    # Exponential backoff before reconnecting; prevents reconnect storms.
+                    delay = self._ws_restart_backoff_delay()
+                    log.info("[Feishu] Watchdog: reconnecting after %.1fs backoff", delay)
+                    await asyncio.sleep(delay)
                     # Brand new Client + thread
                     await self._start_websocket()
                     self._running = True
                     self._last_event_time = time.monotonic()
+                    self._record_ws_restart_success(reason)
                     log.info("[Feishu] Watchdog: reconnected successfully")
                 except Exception as exc:
-                    log.error("[Feishu] Watchdog restart failed: %s", exc)
-                    # Wait before next attempt
-                    await asyncio.sleep(30)
+                    self._record_ws_restart_failure(str(exc))
+                    delay = self._ws_restart_backoff_delay()
+                    log.error("[Feishu] Watchdog restart failed: %s; next retry in %.1fs", exc, delay)
+                    await asyncio.sleep(delay)
 
     async def _kill_ws(self) -> None:
         """Kill WS client and thread completely (hermes _disable_websocket_auto_reconnect pattern)."""
@@ -909,6 +1018,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             f"[msg:{msg_id}] [chat:{chat_id}]"
         )
         display_text = f"{context_prefix}\n{text}" if text.strip() else ""
+        mentions_suffix = ""
 
         # Append other mentioned users/bots so LLM can @mention them
         if mentioned_others:
@@ -917,7 +1027,8 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 else f"open_id={m['open_id']}"
                 for m in mentioned_others
             )
-            display_text += f"\n[群里还提到了: {mentions_info}]"
+            mentions_suffix = f"\n[群里还提到了: {mentions_info}]"
+            display_text += mentions_suffix
 
         channel_msg = ChannelMessage(
             platform=self.platform,
@@ -929,11 +1040,15 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             msg_id=msg_id,
             attachments=attachments,
         )
+        channel_msg._feishu_batch_body_text = text  # type: ignore[attr-defined]
+        channel_msg._feishu_batch_context_prefix = context_prefix  # type: ignore[attr-defined]
+        channel_msg._feishu_batch_mentions_suffix = mentions_suffix  # type: ignore[attr-defined]
 
-        # Per-chat serial lock (openclaw createChatQueue)
-        chat_lock = self._get_chat_lock(chat_id)
-        async with chat_lock:
-            await self._dispatch_with_lifecycle(channel_msg, msg_id)
+        if msg_type == "text" and not attachments:
+            await self._enqueue_text_batch(channel_msg)
+            return
+
+        await self._dispatch_channel_message(channel_msg, msg_id)
 
     def _extract_text(self, msg_type: str, content: dict, msg_body: Any) -> Optional[str]:
         """Return text string for supported message types, None for unsupported."""
@@ -1063,6 +1178,80 @@ class FeishuChannelAdapter(BaseChannelAdapter):
             if chat_id not in self._chat_locks:
                 self._chat_locks[chat_id] = asyncio.Lock()
             return self._chat_locks[chat_id]
+
+    async def _dispatch_channel_message(self, msg: ChannelMessage, msg_id: str) -> None:
+        """Serialize dispatch per chat and keep reaction lifecycle in one place."""
+        chat_lock = self._get_chat_lock(msg.chat_id)
+        async with chat_lock:
+            await self._dispatch_with_lifecycle(msg, msg_id)
+
+    def _text_batch_key(self, msg: ChannelMessage) -> str:
+        """Batch only within the same platform/chat/user session."""
+        return f"{msg.platform}:{msg.chat_id}:{msg.user_id}"
+
+    async def _enqueue_text_batch(self, msg: ChannelMessage) -> None:
+        """Debounce rapid plain text messages into a single dispatch."""
+        key = self._text_batch_key(msg)
+        body_text = getattr(msg, "_feishu_batch_body_text", "") or ""
+        existing = self._pending_text_batches.get(key)
+        if existing is None:
+            self._pending_text_batches[key] = msg
+            self._pending_text_batch_counts[key] = 1
+            self._schedule_text_batch_flush(key)
+            return
+
+        existing_count = self._pending_text_batch_counts.get(key, 1)
+        existing_body = getattr(existing, "_feishu_batch_body_text", "") or ""
+        next_count = existing_count + 1
+        next_body = f"{existing_body}\n{body_text}" if existing_body and body_text else (existing_body or body_text)
+        if next_count > self._text_batch_max_messages or len(next_body) > self._text_batch_max_chars:
+            await self._flush_text_batch_now(key)
+            self._pending_text_batches[key] = msg
+            self._pending_text_batch_counts[key] = 1
+            self._schedule_text_batch_flush(key)
+            return
+
+        existing.msg_id = msg.msg_id
+        existing.user_name = msg.user_name or existing.user_name
+        existing._feishu_batch_body_text = next_body  # type: ignore[attr-defined]
+        existing._feishu_batch_context_prefix = getattr(  # type: ignore[attr-defined]
+            msg, "_feishu_batch_context_prefix", ""
+        ) or getattr(existing, "_feishu_batch_context_prefix", "")
+        existing._feishu_batch_mentions_suffix = (  # type: ignore[attr-defined]
+            getattr(msg, "_feishu_batch_mentions_suffix", "")
+            or getattr(existing, "_feishu_batch_mentions_suffix", "")
+        )
+        prefix = getattr(existing, "_feishu_batch_context_prefix", "") or ""
+        suffix = getattr(existing, "_feishu_batch_mentions_suffix", "") or ""
+        existing.text = f"{prefix}\n{next_body}{suffix}" if prefix else f"{next_body}{suffix}"
+        self._pending_text_batch_counts[key] = next_count
+        self._schedule_text_batch_flush(key)
+
+    def _schedule_text_batch_flush(self, key: str) -> None:
+        prior_task = self._pending_text_batch_tasks.get(key)
+        if prior_task and not prior_task.done():
+            prior_task.cancel()
+        self._pending_text_batch_tasks[key] = asyncio.create_task(self._flush_text_batch(key))
+
+    async def _flush_text_batch(self, key: str) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self._text_batch_delay_seconds)
+            await self._flush_text_batch_now(key)
+        finally:
+            if self._pending_text_batch_tasks.get(key) is current_task:
+                self._pending_text_batch_tasks.pop(key, None)
+
+    async def _flush_text_batch_now(self, key: str) -> None:
+        task = self._pending_text_batch_tasks.pop(key, None)
+        current_task = asyncio.current_task()
+        if task and task is not current_task and not task.done():
+            task.cancel()
+        msg = self._pending_text_batches.pop(key, None)
+        self._pending_text_batch_counts.pop(key, None)
+        if not msg:
+            return
+        await self._dispatch_channel_message(msg, msg.msg_id)
 
     async def _resolve_sender_name(self, open_id: str) -> str:
         """Resolve open_id → display name, cached for session lifetime."""
@@ -1271,6 +1460,7 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
     def _on_card_action(self, data: Any) -> Any:
         """Route card button clicks — resolve ask_user questions or dispatch as synthetic text."""
+        self._record_card_action_metric("received")
         try:
             from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
             # lark-oapi passes a P2CardActionTrigger wrapper whose real payload
@@ -1303,6 +1493,16 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 from marneo.gateway.pending_questions import pending_question_store
                 resolved = pending_question_store.resolve(marneo_question_id, answer)
                 if resolved:
+                    self._record_card_action_metric(
+                        "resolved",
+                        event=self._card_action_event_summary(
+                            action_name=str(getattr(action, "name", "") or ""),
+                            chat_id=chat_id,
+                            msg_id=msg_id,
+                            form_value={},
+                            kind="legacy_resolved",
+                        ),
+                    )
                     log.info("[Feishu] Card action resolved legacy question %s", marneo_question_id)
                     resp = P2CardActionTriggerResponse()
                     resp.toast = {"type": "info", "content": "已收到回复"}
@@ -1334,6 +1534,10 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 form_value = {}
 
             is_submit = action_name.startswith(SUBMIT_BUTTON_PREFIX) or action_name == ACTION_SUBMIT
+            if is_submit:
+                self._record_card_action_metric("submit_detected")
+            if form_value:
+                self._record_card_action_metric("form_value_seen")
             if is_submit or form_value:
                 question_id = ""
                 if action_name.startswith(SUBMIT_BUTTON_PREFIX):
@@ -1354,6 +1558,16 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                         else:
                             answers[question_text] = read_form_text_field(form_value, get_input_field_name(i)) or "(no answer)"
                     pending_question_store.resolve(ctx.question_id, answers)
+                    self._record_card_action_metric(
+                        "resolved",
+                        event=self._card_action_event_summary(
+                            action_name=action_name,
+                            chat_id=chat_id,
+                            msg_id=msg_id,
+                            form_value=form_value,
+                            kind="form_resolved",
+                        ),
+                    )
                     log.info("[Feishu] Card action resolved question %s", ctx.question_id)
                     resp = P2CardActionTriggerResponse()
                     resp.toast = {"type": "info", "content": "已收到回复"}
@@ -1363,6 +1577,16 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 # context exists (expired/already answered, or malformed context).
                 # Do not fall through to generic command dispatch; that creates
                 # a bogus empty-chat message and can trigger LLM work.
+                self._record_card_action_metric(
+                    "ignored_no_pending",
+                    event=self._card_action_event_summary(
+                        action_name=action_name,
+                        chat_id=chat_id,
+                        msg_id=msg_id,
+                        form_value=form_value,
+                        kind="no_pending",
+                    ),
+                )
                 log.info(
                     "[Feishu] Card action submit ignored: no pending question "
                     "(action=%s chat=%s msg=%s form_keys=%s)",
@@ -1389,8 +1613,19 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                 asyncio.run_coroutine_threadsafe(
                     self._manager.dispatch(channel_msg), self._loop
                 )
+                self._record_card_action_metric(
+                    "synthetic_dispatched",
+                    event=self._card_action_event_summary(
+                        action_name=action_name,
+                        chat_id=chat_id,
+                        msg_id=msg_id,
+                        form_value=form_value if isinstance(form_value, dict) else {},
+                        kind="synthetic_command",
+                    ),
+                )
             return P2CardActionTriggerResponse()
         except Exception as exc:
+            self._record_card_action_metric("errors")
             log.warning("[Feishu] Card action handler error: %s", exc)
             return None
 
@@ -1624,6 +1859,8 @@ class FeishuChannelAdapter(BaseChannelAdapter):
 
     async def disconnect(self) -> None:
         self._running = False
+        for key in list(self._pending_text_batches):
+            await self._flush_text_batch_now(key)
         await self._kill_ws()
         log.info("[Feishu] Disconnected (employee=%s)", self._employee_name or "—")
 

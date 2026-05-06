@@ -110,3 +110,60 @@ async def test_send_with_tools_no_registry_falls_back_to_send():
 
     texts = [e.content for e in events if e.type == "text"]
     assert "plain response" in texts
+
+
+@pytest.mark.asyncio
+async def test_send_with_tools_truncates_large_tool_result_before_injecting_context():
+    reg = ToolRegistry()
+    huge = "x" * 1000
+    reg.register(
+        name="huge_tool",
+        description="huge",
+        schema={"name": "huge_tool", "description": "huge", "parameters": {"type": "object", "properties": {}}},
+        handler=lambda args, **kw: huge,
+    )
+    session = ChatSession(tool_result_context_max_chars=120)
+    call_count = 0
+    second_round_tool_context = ""
+
+    async def fake_tool_defs(text, tool_defs, attachments=None):
+        nonlocal call_count, second_round_tool_context
+        call_count += 1
+        if call_count == 1:
+            yield ChatEvent(type="tool_call", content=json.dumps({"id": "tc1", "name": "huge_tool", "args": {}}))
+            yield ChatEvent(type="done")
+        else:
+            tool_msgs = [m for m in session.messages if m.get("role") == "tool"]
+            second_round_tool_context = tool_msgs[-1]["content"]
+            yield ChatEvent(type="text", content="done")
+            yield ChatEvent(type="done")
+
+    with patch.object(session, "_send_with_tool_defs", side_effect=fake_tool_defs):
+        events = []
+        async for e in session.send_with_tools("hi", registry=reg):
+            events.append(e)
+
+    tool_events = [e for e in events if e.type == "tool_result"]
+    assert tool_events[0].content == huge
+    assert len(second_round_tool_context) <= 120
+    assert "truncated" in second_round_tool_context.lower()
+    assert "original_chars=1000" in second_round_tool_context
+
+
+def test_prune_context_budget_keeps_system_and_recent_messages():
+    session = ChatSession(context_budget_max_chars=220)
+    session.messages = [
+        {"role": "user", "content": "old-user-" + "a" * 120},
+        {"role": "assistant", "content": "old-assistant-" + "b" * 120},
+        {"role": "tool", "content": "old-tool-" + "c" * 120},
+        {"role": "user", "content": "recent-user"},
+        {"role": "assistant", "content": "recent-assistant"},
+    ]
+
+    session._prune_context_budget()
+
+    assert len(session.messages) < 5
+    assert session.messages[-2]["content"] == "recent-user"
+    assert session.messages[-1]["content"] == "recent-assistant"
+    assert session.messages[0]["role"] == "system"
+    assert "omitted" in session.messages[0]["content"].lower()
