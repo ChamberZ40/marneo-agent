@@ -91,7 +91,13 @@ class GatewayManager:
 
         reply = "".join(parts).strip()
         if not reply:
-            return
+            log.warning(
+                "[Gateway] Empty reply from engine platform=%s chat_id=%s msg_id=%s",
+                msg.platform,
+                msg.chat_id,
+                msg.msg_id or "",
+            )
+            reply = "模型没有返回内容，请重试。"
         while reply:
             chunk, reply = reply[:MAX_REPLY_LEN], reply[MAX_REPLY_LEN:]
             await adapter.send_reply(msg.chat_id, chunk, context_token=msg.context_token)

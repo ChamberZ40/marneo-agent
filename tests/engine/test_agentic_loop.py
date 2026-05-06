@@ -95,6 +95,31 @@ async def test_send_with_tools_respects_max_iterations():
 
 
 @pytest.mark.asyncio
+async def test_loop_detection_does_not_emit_max_iterations_error_after_loop_error():
+    """Loop detection is a terminal stop reason, not a max-iteration exhaustion."""
+    reg = ToolRegistry()
+    reg.register(
+        name="loop_tool", description="", schema={"name": "loop_tool", "description": "",
+        "parameters": {"type": "object", "properties": {}}},
+        handler=lambda args, **kw: tool_result(ok=True),
+    )
+    session = ChatSession()
+
+    async def always_calls_same_tool(text, tool_defs, attachments=None):
+        yield ChatEvent(type="tool_call", content=json.dumps({"id": "t1", "name": "loop_tool", "args": {}}))
+        yield ChatEvent(type="done")
+
+    with patch.object(session, "_send_with_tool_defs", side_effect=always_calls_same_tool):
+        events = []
+        async for e in session.send_with_tools("go", registry=reg, max_iterations=20):
+            events.append(e)
+
+    errors = [e.content for e in events if e.type == "error"]
+    assert any("Tool loop detected" in err for err in errors)
+    assert not any("max_iterations reached" in err for err in errors)
+
+
+@pytest.mark.asyncio
 async def test_send_with_tools_no_registry_falls_back_to_send():
     """With no registry, falls back to plain send()."""
     session = ChatSession()

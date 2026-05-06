@@ -16,8 +16,8 @@ log = logging.getLogger(__name__)
 
 _MAX_TEXT_INJECT = 200_000  # 200 KB max for text file inline injection
 _LOOP_DETECT_THRESHOLD = 3  # consecutive identical tool calls before breaking
-_DEFAULT_TOOL_RESULT_CONTEXT_MAX_CHARS = 50_000
-_DEFAULT_CONTEXT_BUDGET_MAX_CHARS = 180_000
+_DEFAULT_TOOL_RESULT_CONTEXT_MAX_CHARS = 8_000
+_DEFAULT_CONTEXT_BUDGET_MAX_CHARS = 50_000
 
 
 def _build_content_blocks(
@@ -137,6 +137,45 @@ class ChatSession:
     def _context_chars(self) -> int:
         return sum(len(self._message_text(m)) for m in self.messages)
 
+    def _truncate_message_content(self, message: dict[str, Any], limit: int) -> None:
+        """Trim a single message's content in-place when it alone exceeds budget."""
+        if limit <= 0:
+            message["content"] = ""
+            return
+        content = message.get("content", "")
+        marker = f"\n... [message truncated to fit {limit} chars context budget]"
+        if len(marker) > limit:
+            marker = marker[:limit]
+        keep = max(0, limit - len(marker))
+        if isinstance(content, str):
+            if len(content) > limit:
+                message["content"] = (content[:keep] + marker)[:limit]
+            return
+        text = str(content)
+        if len(text) > limit:
+            message["content"] = (text[:keep] + marker)[:limit]
+
+    def _drop_orphan_tool_messages(self) -> None:
+        """Remove tool-result messages whose assistant tool-call was pruned."""
+        cleaned: list[dict[str, Any]] = []
+        available_tool_call_ids: set[str] = set()
+        for message in self.messages:
+            if message.get("role") == "assistant":
+                tool_calls = message.get("tool_calls") or []
+                for call in tool_calls:
+                    call_id = call.get("id") if isinstance(call, dict) else None
+                    if call_id:
+                        available_tool_call_ids.add(str(call_id))
+                cleaned.append(message)
+                continue
+            if message.get("role") == "tool":
+                call_id = message.get("tool_call_id")
+                if call_id and str(call_id) in available_tool_call_ids:
+                    cleaned.append(message)
+                continue
+            cleaned.append(message)
+        self.messages = cleaned
+
     def _truncate_tool_result_for_context(self, result: Any) -> str:
         text = result if isinstance(result, str) else str(result)
         limit = max(0, int(self.tool_result_context_max_chars))
@@ -151,9 +190,6 @@ class ChatSession:
         budget = int(self.context_budget_max_chars or 0)
         if budget <= 0 or self._context_chars() <= budget:
             return
-        if len(self.messages) <= 2:
-            return
-
         recent_keep = min(2, len(self.messages))
         recent = self.messages[-recent_keep:]
         older = self.messages[:-recent_keep]
@@ -161,12 +197,34 @@ class ChatSession:
         while older and sum(len(self._message_text(m)) for m in older + recent) > budget:
             older.pop(0)
             omitted += 1
+
+        # If the latest exchange alone exceeds budget, keep the newest message and
+        # record that the earlier part of the exchange was omitted.
+        if not older and len(recent) > 1 and sum(len(self._message_text(m)) for m in recent) > budget:
+            omitted += len(recent) - 1
+            recent = recent[-1:]
+
         if omitted:
             summary = {
                 "role": "system",
-                "content": f"[context budget: omitted {omitted} older messages to stay under {budget} chars]",
+                "content": f"[omitted {omitted} older messages]",
             }
             self.messages = [summary] + older + recent
+        else:
+            self.messages = older + recent
+        self._drop_orphan_tool_messages()
+
+        while self._context_chars() > budget and len(self.messages) > 1:
+            candidate = 1 if self.messages[0].get("role") == "system" else 0
+            if candidate >= len(self.messages) - 1:
+                break
+            self.messages.pop(candidate)
+            self._drop_orphan_tool_messages()
+
+        if self._context_chars() > budget and self.messages:
+            reserved = sum(len(self._message_text(m)) for m in self.messages[:-1])
+            self._truncate_message_content(self.messages[-1], max(0, budget - reserved))
+            self._drop_orphan_tool_messages()
 
 
     async def send(
@@ -199,6 +257,7 @@ class ChatSession:
 
             if collected:
                 self.messages.append({"role": "assistant", "content": collected})
+                self._prune_context_budget()
 
         except Exception as exc:
             log.error("Chat error: %s", exc)
@@ -282,6 +341,7 @@ class ChatSession:
                 yield ChatEvent(type="error",
                                 content=f"Tool loop detected: {tool_calls_this_round[0].get('name')} "
                                         f"called {_repeat_count} times with identical arguments")
+                hit_limit = False
                 break
 
             # Execute tools and inject results into history for next LLM call
@@ -329,6 +389,7 @@ class ChatSession:
                 protocol=provider.protocol,
             )
             self.messages.append({"role": "user", "content": content})
+            self._prune_context_budget()
 
         collected_text = ""
         tool_calls_raw: list[dict] = []
@@ -352,6 +413,7 @@ class ChatSession:
             # Append to history
             if collected_text:
                 self.messages.append({"role": "assistant", "content": collected_text})
+                self._prune_context_budget()
             if tool_calls_raw:
                 valid_tcs = [tc for tc in tool_calls_raw if tc is not None]
                 if valid_tcs:
