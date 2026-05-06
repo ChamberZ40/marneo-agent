@@ -232,14 +232,24 @@ Do not commit local runtime data, real credentials, gateway logs, customer files
 git clone git@github.com:ChamberZ40/marneo-agent.git
 cd marneo-agent
 python3 -m pip install -e '.[dev]'
-python3 -m pytest tests -q
+python3 -m pytest -q
+```
+
+Stress tests are separated from the deterministic suite because they can use live provider credentials, take longer, and write reports under `tests/stress/results/`:
+
+```bash
+# deterministic tests; stress tests are excluded by pytest.ini
+python3 -m pytest -q
+
+# explicit stress run; may call the configured live provider
+python3 -m pytest -m stress -v -s
 ```
 
 Before committing or pushing:
 
 ```bash
 git diff --check
-python3 -m pytest tests -q
+python3 -m pytest -q
 ```
 
 Also scan staged files for provider keys, Feishu secrets, access tokens, WebSocket tickets, authorization headers, and private key blocks.

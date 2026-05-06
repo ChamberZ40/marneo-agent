@@ -8,3 +8,4 @@ build/
 .venv/
 venv/
 __pycache__/
+tests/stress/results/
