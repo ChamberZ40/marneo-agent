@@ -5,11 +5,15 @@ Each employee can have their own Feishu App (Bot).
 Config stored at: ~/.marneo/employees/<name>/feishu.yaml
 
 Fields:
-  app_id      - Feishu App ID
-  app_secret  - Feishu App Secret
-  domain      - "feishu" | "lark", default "feishu"
-  bot_open_id - Bot's own open_id (fetched during probe)
-  team_chat_id- Feishu group chat ID for team collaboration (optional)
+  app_id       - Feishu App ID
+  app_secret   - Feishu App Secret
+  domain       - "feishu" | "lark", default "feishu"
+  bot_open_id  - Bot's own open_id (fetched during probe)
+  bot_user_id  - Bot's tenant-scoped user_id (optional fallback for mention matching)
+  bot_name     - Bot display name (fallback for mention matching when IDs unavailable)
+  dm_policy    - "open" | "disabled", default "open"
+  group_policy - "open" | "at_only" | "disabled", default "at_only"
+  team_chat_id - Feishu group chat ID for team collaboration (optional)
 """
 from __future__ import annotations
 
@@ -29,6 +33,10 @@ class EmployeeFeishuConfig:
     app_secret: str
     domain: str = "feishu"
     bot_open_id: str = ""
+    bot_user_id: str = ""
+    bot_name: str = ""
+    dm_policy: str = "open"
+    group_policy: str = "at_only"
     team_chat_id: str = ""
 
     @property
@@ -58,6 +66,10 @@ def load_feishu_config(employee_name: str) -> EmployeeFeishuConfig | None:
             app_secret=data.get("app_secret", ""),
             domain=data.get("domain", "feishu"),
             bot_open_id=data.get("bot_open_id", ""),
+            bot_user_id=data.get("bot_user_id", ""),
+            bot_name=data.get("bot_name", ""),
+            dm_policy=data.get("dm_policy", "open"),
+            group_policy=data.get("group_policy", "at_only"),
             team_chat_id=data.get("team_chat_id", ""),
         )
     except Exception:
@@ -73,6 +85,10 @@ def save_feishu_config(config: EmployeeFeishuConfig) -> Path:
         "app_secret": config.app_secret,
         "domain": config.domain,
         "bot_open_id": config.bot_open_id,
+        "bot_user_id": config.bot_user_id,
+        "bot_name": config.bot_name,
+        "dm_policy": config.dm_policy,
+        "group_policy": config.group_policy,
         "team_chat_id": config.team_chat_id,
     }
     path.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")

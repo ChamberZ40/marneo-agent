@@ -5,10 +5,14 @@
 ### Added
 - **Local Web Console (`marneo web`)**: loopback-only browser console for local Marneo status, employees, projects, gateway health, and redacted logs. Defaults to `127.0.0.1:8787`; LAN binding requires explicit `--allow-lan`.
 - **Privacy / local-only coverage**: documents and tests `marneo setup local`, `privacy.local_only: true`, local Provider enforcement, and external-tool gating.
+- **Feishu group mention precision plan**: detailed implementation plan for `at_only` group routing, self-message filtering, and per-employee bot identity wiring.
+- **Feishu mention/self-filter regression tests**: covers bot open_id/user_id/name mention matching, `at_only` behavior, explicit `all_only`, and self-sent bot filtering.
 
 ### Changed
 - **README is now English-first**: GitHub landing page opens with the English product overview, with a direct jump to the Chinese version.
 - **README product onboarding**: documents one-line install, local CLI (`marneo work`), local Web Console (`marneo web`), Feishu-first multi-bot setup, and pre-commit safety checks.
+- **Feishu group routing**: `at_only` now requires an explicit mention of the current employee bot; missing bot identity no longer treats any @mention as a match.
+- **Feishu self-message filtering**: now checks both bot open_id and bot user_id while still allowing other bots for multi-agent collaboration.
 
 ## [0.2.0] - 2026-04-28
 

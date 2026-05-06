@@ -339,6 +339,8 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         self._group_policy = "at_only"
         self._allowed_users: list[str] = []
         self._bot_open_id = ""
+        self._bot_user_id = ""
+        self._bot_name = ""
 
         # WS state
         self._ws_client: Any = None
@@ -406,6 +408,10 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         self._dm_policy = config.get("dm_policy", "open")
         self._group_policy = config.get("group_policy", "at_only")
         self._allowed_users = config.get("allowed_users", [])
+        # Pre-populate bot identity from config (hydration fills gaps later)
+        self._bot_open_id = config.get("bot_open_id", "") or self._bot_open_id
+        self._bot_user_id = config.get("bot_user_id", "") or self._bot_user_id
+        self._bot_name = config.get("bot_name", "") or self._bot_name
         self._loop = asyncio.get_running_loop()
         self._dedup = MessageDeduplicator(self._app_id)
 
@@ -556,8 +562,8 @@ class FeishuChannelAdapter(BaseChannelAdapter):
     # -------------------------------------------------------------------------
 
     async def _hydrate_bot_identity(self) -> None:
-        """Fetch bot open_id via /bot/v3/info; required for @-mention filtering."""
-        if self._bot_open_id:
+        """Fetch bot identity via /bot/v3/info for mention filtering."""
+        if self._bot_open_id and self._bot_user_id and self._bot_name:
             return
         try:
             import httpx
@@ -575,9 +581,15 @@ class FeishuChannelAdapter(BaseChannelAdapter):
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 bot = r2.json().get("bot", {})
-                self._bot_open_id = bot.get("open_id", "")
-                bot_name = bot.get("app_name", "")
-                log.info("[Feishu] Bot identity: open_id=%s name=%s", self._bot_open_id, bot_name)
+                self._bot_open_id = self._bot_open_id or bot.get("open_id", "")
+                self._bot_user_id = self._bot_user_id or bot.get("user_id", "")
+                self._bot_name = self._bot_name or bot.get("app_name", "") or bot.get("name", "")
+                log.info(
+                    "[Feishu] Bot identity: open_id=%s user_id=%s name=%s",
+                    self._bot_open_id[:12] if self._bot_open_id else "none",
+                    self._bot_user_id[:12] if self._bot_user_id else "none",
+                    self._bot_name or "none",
+                )
         except Exception as exc:
             log.warning("[Feishu] Failed to hydrate bot identity: %s", exc)
 
@@ -822,39 +834,22 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         if text is None:
             return  # unsupported type
 
-        # Group policy — at_only requires @mention
+        # Group policy — default at_only requires explicit @mention of this bot
         mentioned_others: list[dict] = []  # other users/bots mentioned in the message
         if chat_type == "group":
-            if self._group_policy == "disabled":
-                return
-            if self._group_policy == "at_only":
-                mentions = getattr(msg_body, "mentions", []) or []
-                # Debug: log what mentions actually look like
-                for m in mentions:
-                    m_id = getattr(m, "id", None)
-                    log.info("[Feishu] Mention: name=%s open_id=%s key=%s | bot_open_id=%s",
-                             getattr(m, "name", "?"), getattr(m_id, "open_id", "?") if m_id else "no_id",
-                             getattr(m, "key", "?"), self._bot_open_id[:16] if self._bot_open_id else "none")
-                bot_mentioned = (
-                    any(getattr(getattr(m, "id", None), "open_id", "") == self._bot_open_id
-                        for m in mentions)
-                    if self._bot_open_id else bool(mentions)
+            mentions = getattr(msg_body, "mentions", []) or []
+            if not self._should_accept_group_message(content_str, mentions):
+                log.debug(
+                    "[Feishu] Group msg dropped: policy=%s chat=%s bot_open_id=%s bot_user_id=%s mentions=%d",
+                    self._group_policy,
+                    chat_id[:12],
+                    self._bot_open_id[:12] if self._bot_open_id else "none",
+                    self._bot_user_id[:12] if self._bot_user_id else "none",
+                    len(mentions),
                 )
-                if not bot_mentioned:
-                    log.debug("[Feishu] Group msg dropped: bot not @mentioned (chat=%s policy=at_only bot_id=%s mentions=%d)",
-                             chat_id[:12], self._bot_open_id[:12] if self._bot_open_id else "none", len(mentions))
-                    return
-                # Collect other mentioned users/bots (for LLM context)
-                for m in mentions:
-                    m_open_id = getattr(getattr(m, "id", None), "open_id", "") or ""
-                    m_name = getattr(m, "name", "") or ""
-                    if m_open_id and m_open_id != self._bot_open_id:
-                        mentioned_others.append({"open_id": m_open_id, "name": m_name})
-                    # Strip @name from text
-                    if m_name:
-                        text = text.replace(f"@{m_name}", "").strip()
-                # Also strip @_user_N placeholder patterns
-                text = re.sub(r"@_user_\d+", "", text).strip()
+                return
+            mentioned_others = self._collect_non_self_mentions(mentions)
+            text = self._strip_feishu_mentions(text, mentions)
 
         if chat_type == "p2p" and self._dm_policy == "disabled":
             return
@@ -972,19 +967,93 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         except Exception:
             return "[富文本消息]"
 
+    def _message_mentions_this_bot(self, mentions: list[Any]) -> bool:
+        """Return True when a Feishu mention explicitly targets this bot.
+
+        IDs are authoritative. Name fallback is only used when no comparable ID
+        is present in the mention payload. If bot identity is unavailable, do
+        not treat "any mention" as a match.
+        """
+        for mention in mentions or []:
+            mention_id = getattr(mention, "id", None)
+            mention_open_id = str(getattr(mention_id, "open_id", "") or "").strip()
+            mention_user_id = str(getattr(mention_id, "user_id", "") or "").strip()
+            mention_name = str(getattr(mention, "name", "") or "").strip()
+
+            if mention_open_id and self._bot_open_id:
+                if mention_open_id == self._bot_open_id:
+                    return True
+                continue
+            if mention_user_id and self._bot_user_id:
+                if mention_user_id == self._bot_user_id:
+                    return True
+                continue
+            if self._bot_name and mention_name == self._bot_name:
+                return True
+        return False
+
+    def _should_accept_group_message(self, raw_content: str, mentions: list[Any]) -> bool:
+        """Apply Marneo's group policy before dispatching a group message."""
+        policy = (self._group_policy or "at_only").strip().lower()
+        if policy == "disabled":
+            return False
+        if policy == "open":
+            return True
+        if policy == "all_only":
+            return "@_all" in (raw_content or "")
+        if policy == "at_only":
+            return self._message_mentions_this_bot(mentions)
+        log.warning("[Feishu] Unknown group_policy=%r; falling back to at_only", self._group_policy)
+        return self._message_mentions_this_bot(mentions)
+
+    def _collect_non_self_mentions(self, mentions: list[Any]) -> list[dict[str, str]]:
+        """Collect mentions that target other users/bots for LLM context."""
+        others: list[dict[str, str]] = []
+        for mention in mentions or []:
+            mention_id = getattr(mention, "id", None)
+            open_id = str(getattr(mention_id, "open_id", "") or "").strip()
+            user_id = str(getattr(mention_id, "user_id", "") or "").strip()
+            name = str(getattr(mention, "name", "") or "").strip()
+            if self._bot_open_id and open_id == self._bot_open_id:
+                continue
+            if self._bot_user_id and user_id == self._bot_user_id:
+                continue
+            if open_id or user_id or name:
+                item = {"name": name}
+                if open_id:
+                    item["open_id"] = open_id
+                if user_id:
+                    item["user_id"] = user_id
+                others.append(item)
+        return others
+
+    @staticmethod
+    def _strip_feishu_mentions(text: str, mentions: list[Any]) -> str:
+        """Remove Feishu @mention display text/placeholders from message text."""
+        cleaned = text or ""
+        for mention in mentions or []:
+            name = str(getattr(mention, "name", "") or "").strip()
+            if name:
+                cleaned = cleaned.replace(f"@{name}", "").strip()
+        cleaned = re.sub(r"@_user_\d+", "", cleaned).strip()
+        cleaned = cleaned.replace("@_all", "").strip()
+        return cleaned
+
     def _is_self_sent_bot_message(self, sender: Any) -> bool:
         """Return True only for events emitted by THIS bot.
 
-        Ported from hermes-agent: drop self-sent messages to prevent
-        infinite loops, but allow other bots' messages through so
-        multi-agent @mention collaboration works in group chats.
+        Drop self-sent messages to prevent infinite loops, but allow other
+        bots' messages through so multi-agent @mention collaboration works.
         """
         sender_type = str(getattr(sender, "sender_type", "") or "").strip().lower()
         if sender_type not in {"bot", "app"}:
             return False
         sender_id_obj = getattr(sender, "sender_id", None)
         sender_open_id = str(getattr(sender_id_obj, "open_id", "") or "").strip()
+        sender_user_id = str(getattr(sender_id_obj, "user_id", "") or "").strip()
         if self._bot_open_id and sender_open_id == self._bot_open_id:
+            return True
+        if self._bot_user_id and sender_user_id == self._bot_user_id:
             return True
         return False
 

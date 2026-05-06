@@ -113,6 +113,11 @@ class GatewayManager:
                     "app_id": emp_cfg.app_id,
                     "app_secret": emp_cfg.app_secret,
                     "domain": emp_cfg.domain,
+                    "bot_open_id": emp_cfg.bot_open_id,
+                    "bot_user_id": emp_cfg.bot_user_id,
+                    "bot_name": emp_cfg.bot_name,
+                    "dm_policy": emp_cfg.dm_policy,
+                    "group_policy": emp_cfg.group_policy,
                     "enabled": True,
                 }
                 try:
