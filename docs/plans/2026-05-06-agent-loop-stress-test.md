@@ -96,13 +96,13 @@ tests/stress/
 pytest -q
 
 # 阶段一
-pytest tests/stress/test_engine_stress.py -m stress -v -s
+MARNEO_RUN_STRESS=1 pytest tests/stress/test_engine_stress.py -m stress -v -s
 
 # 阶段二
-pytest tests/stress/test_feishu_stress.py -m stress -v -s
+MARNEO_RUN_STRESS=1 pytest tests/stress/test_feishu_stress.py -m stress -v -s
 
 # 全部 stress
-pytest -m stress -v -s
+MARNEO_RUN_STRESS=1 pytest -m stress -v -s
 ```
 
 ## 注意事项

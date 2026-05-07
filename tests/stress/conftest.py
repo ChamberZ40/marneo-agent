@@ -10,6 +10,8 @@ import ast
 import json
 import math
 import operator
+import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,11 +22,64 @@ import pytest
 from marneo.tools.registry import ToolRegistry, tool_result
 
 RESULTS_DIR = Path(__file__).parent / "results"
+STRESS_OPT_IN_ENV = "MARNEO_RUN_STRESS"
+STRESS_OPT_IN_VALUES = {"1", "true", "yes", "on"}
+SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|app[_-]?secret|client[_-]?secret|access[_-]?token|"
+    r"refresh[_-]?token|access[_-]?key|ticket|authorization)"
+)
+SENSITIVE_VALUE_REPLACEMENTS = [
+    (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}\b"), "[REDACTED]"),
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{24,}\b"), "[REDACTED]"),
+    (
+        re.compile(
+            r"(?i)(\bAuthorization\b[\"']?\s*[:=]\s*[\"']?(?:Bearer\s+)?)"
+            r"([^\"'\s,)}\]]{16,})([\"']?)"
+        ),
+        r"\1[REDACTED]\3",
+    ),
+    (
+        re.compile(
+            r"(?i)(\b(api[_-]?key|access[_-]?token|refresh[_-]?token|"
+            r"app[_-]?secret|client[_-]?secret|access[_-]?key|ticket)\b"
+            r"[\"']?\s*[:=]\s*[\"']?)"
+            r"([^\"'\s,)}\]]{16,})([\"']?)"
+        ),
+        r"\1[REDACTED]\4",
+    ),
+]
+
+
+def _redact_sensitive(value: Any) -> Any:
+    """Redact secret-like values before writing stress reports to disk."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            if SENSITIVE_KEY_RE.search(str(key)):
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_sensitive(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_sensitive(item) for item in value)
+    if isinstance(value, str):
+        text = value
+        for pattern, replacement in SENSITIVE_VALUE_REPLACEMENTS:
+            text = pattern.sub(replacement, text)
+        return text
+    return value
 
 
 @pytest.fixture(autouse=True)
 def hermetic_env():
     """Override root hermetic_env: stress tests need real config and credentials."""
+    if os.environ.get(STRESS_OPT_IN_ENV, "").strip().lower() not in STRESS_OPT_IN_VALUES:
+        pytest.skip(
+            "Stress tests use live provider credentials; "
+            f"set {STRESS_OPT_IN_ENV}=1 to run them."
+        )
     from marneo.engine.provider import _pool
     _pool._initialized = False
     _pool._providers.clear()
@@ -202,10 +257,10 @@ class StressReporter:
         self._provider: str = ""
 
     def record_round(self, **metrics: Any) -> None:
-        self.rounds.append(metrics)
+        self.rounds.append(_redact_sensitive(metrics))
 
     def set_provider(self, provider_id: str, model: str) -> None:
-        self._provider = f"{model} ({provider_id})"
+        self._provider = _redact_sensitive(f"{model} ({provider_id})")
 
     def save(self) -> Path:
         report = {

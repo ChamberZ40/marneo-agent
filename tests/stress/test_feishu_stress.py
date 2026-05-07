@@ -11,13 +11,13 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.stress
-
 from marneo.gateway.base import BaseChannelAdapter, ChannelMessage
 from marneo.gateway.manager import GatewayManager
 from marneo.tools.registry import registry as global_registry
 
 from .conftest import StressReporter, _eval_arithmetic
+
+pytestmark = pytest.mark.stress
 
 
 class MockFeishuAdapter(BaseChannelAdapter):
@@ -69,64 +69,64 @@ def _register_stress_tools() -> None:
     from datetime import datetime
     from marneo.tools.registry import tool_result
 
-    if global_registry.get_entry("get_current_time"):
-        return
-
-    global_registry.register(
-        name="get_current_time",
-        description="Get the current date and time",
-        schema={
-            "name": "get_current_time",
-            "description": "Get the current date and time",
-            "parameters": {"type": "object", "properties": {}},
-        },
-        handler=lambda args, **kw: tool_result(
-            time=datetime.now().isoformat(),
-            timestamp=time.time(),
-        ),
-    )
-
-    global_registry.register(
-        name="calculate",
-        description="Calculate a math expression safely",
-        schema={
-            "name": "calculate",
-            "description": "Calculate a math expression.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {"type": "string", "description": "Math expression"},
-                },
-                "required": ["expression"],
+    if not global_registry.get_entry("get_current_time"):
+        global_registry.register(
+            name="get_current_time",
+            description="Get the current date and time",
+            schema={
+                "name": "get_current_time",
+                "description": "Get the current date and time",
+                "parameters": {"type": "object", "properties": {}},
             },
-        },
-        handler=lambda args, **kw: tool_result(
-            expression=args.get("expression", ""),
-            result=_eval_arithmetic(args.get("expression", "0")),
-        ),
-    )
+            handler=lambda args, **kw: tool_result(
+                time=datetime.now().isoformat(),
+                timestamp=time.time(),
+            ),
+        )
 
-    global_registry.register(
-        name="search_knowledge",
-        description="Search knowledge base",
-        schema={
-            "name": "search_knowledge",
-            "description": "Search the internal knowledge base.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query"},
+    if not global_registry.get_entry("calculate"):
+        global_registry.register(
+            name="calculate",
+            description="Calculate a math expression safely",
+            schema={
+                "name": "calculate",
+                "description": "Calculate a math expression.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "expression": {"type": "string", "description": "Math expression"},
+                    },
+                    "required": ["expression"],
                 },
-                "required": ["query"],
             },
-        },
-        handler=lambda args, **kw: tool_result(
-            results=[
-                {"title": "Result 1", "snippet": "项目管理最佳实践..."},
-                {"title": "Result 2", "snippet": "微服务架构设计..."},
-            ]
-        ),
-    )
+            handler=lambda args, **kw: tool_result(
+                expression=args.get("expression", ""),
+                result=_eval_arithmetic(args.get("expression", "0")),
+            ),
+        )
+
+    if not global_registry.get_entry("search_knowledge"):
+        global_registry.register(
+            name="search_knowledge",
+            description="Search knowledge base",
+            schema={
+                "name": "search_knowledge",
+                "description": "Search the internal knowledge base.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                    },
+                    "required": ["query"],
+                },
+            },
+            handler=lambda args, **kw: tool_result(
+                results=[
+                    {"title": "Result 1", "snippet": "项目管理最佳实践..."},
+                    {"title": "Result 2", "snippet": "微服务架构设计..."},
+                ]
+            ),
+        )
 
 
 TASKS = [
@@ -151,7 +151,7 @@ async def test_feishu_session_lifecycle():
 
     # Patch SessionStore to use our employee-less engine (skip profile loading)
     print(f"\n{'='*60}")
-    print(f"  Feishu Session Lifecycle Test")
+    print("  Feishu Session Lifecycle Test")
     print(f"{'='*60}")
 
     total_rounds = 10
@@ -208,7 +208,7 @@ async def test_feishu_multi_session():
     reporter = StressReporter("feishu_multi_session")
 
     print(f"\n{'='*60}")
-    print(f"  Feishu Multi-Session Test")
+    print("  Feishu Multi-Session Test")
     print(f"{'='*60}")
 
     num_sessions = 5
@@ -260,7 +260,7 @@ async def test_feishu_message_accumulation():
     reporter = StressReporter("feishu_message_accumulation")
 
     print(f"\n{'='*60}")
-    print(f"  Feishu Message Accumulation Test")
+    print("  Feishu Message Accumulation Test")
     print(f"{'='*60}")
 
     total_rounds = 15

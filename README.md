@@ -242,7 +242,7 @@ Stress tests are separated from the deterministic suite because they can use liv
 python3 -m pytest -q
 
 # explicit stress run; may call the configured live provider
-python3 -m pytest -m stress -v -s
+MARNEO_RUN_STRESS=1 python3 -m pytest -m stress -v -s
 ```
 
 Before committing or pushing:
