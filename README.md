@@ -93,16 +93,18 @@ Feishu/Lark gateway:
 
 ```bash
 marneo setup feishu --employee laoqi
-marneo gateway install    # optional but recommended for 24/7 service supervision
-marneo gateway start      # uses systemd/launchd if installed; otherwise falls back to a temporary background process
-marneo gateway status
-marneo gateway logs
+marneo gateway install    # recommended: install a user-level systemd/launchd service for 24/7 supervision
+marneo gateway start      # hands off to systemd/launchd when installed; otherwise uses a temporary background process
+marneo gateway status     # shows PID/runtime state plus installed service state
+marneo gateway logs       # reads ~/.marneo/logs/gateway.log with secret redaction
 ```
+
+`marneo gateway start` reports a successful handoff to the service manager. Long-running health should be checked with `marneo gateway status`, `marneo gateway logs`, and the gateway health endpoint.
 
 Foreground/debug mode:
 
 ```bash
-marneo gateway run
+marneo gateway run        # stable foreground entrypoint used by systemd/launchd
 # legacy compatibility: marneo gateway start --fg
 ```
 
@@ -129,6 +131,42 @@ privacy:
 ```
 
 In local-only/private mode, the provider must be localhost/loopback. Runtime gating disables external network tools such as web_fetch / web_search, lark_cli, Feishu, ask_user, and MCP while keeping local file and bash tools available. The local `marneo web` console itself remains usable because it binds to loopback by default.
+
+### Gateway runtime and supervision
+
+The Feishu/Lark gateway is designed as a supervised runtime, not as a `nohup` bot loop.
+
+```text
+marneo gateway install
+    ├─ Linux: writes ~/.config/systemd/user/marneo-gateway.service
+    └─ macOS: writes ~/Library/LaunchAgents/com.marneo.gateway.plist
+
+marneo gateway run
+    └─ foreground runtime entrypoint used by service managers
+```
+
+Runtime evidence is stored locally:
+
+```text
+~/.marneo/gateway.pid           # current live PID when running
+~/.marneo/gateway_state.json    # redacted runtime/channel snapshot
+~/.marneo/logs/gateway.log      # redacted gateway log stream
+```
+
+Lifecycle semantics:
+
+- `start` uses the installed system service when available; otherwise it starts a temporary background process.
+- `stop` and `restart` wait for the old PID/service command to finish before reporting success.
+- `status` combines local PID/runtime state with installed systemd/launchd service state.
+- Runtime state and status output are redacted before being written or displayed.
+
+Health checks:
+
+```bash
+marneo gateway status
+marneo gateway logs -n 100
+curl -fsS http://127.0.0.1:8765/health
+```
 
 ### Multiple Feishu/Lark bots
 
@@ -181,6 +219,11 @@ Feishu / Lark
     ↓ WebSocket events
 FeishuChannelAdapter
     ↓ ChannelMessage(platform=feishu:<employee>)
+Supervised Gateway Runtime
+    ├─ PID/runtime state under ~/.marneo
+    ├─ gateway lock and service lifecycle
+    ├─ systemd/launchd user service integration
+    └─ redacted status/log output
 GatewayManager
     ├─ dedup
     ├─ per-chat lock
@@ -259,7 +302,9 @@ MARNEO_RUN_STRESS=1 python3 -m pytest -m stress -v -s
 Before committing or pushing:
 
 ```bash
+git status --short
 git diff --check
+ruff check marneo/cli/gateway_cmd.py marneo/gateway/supervisor.py tests/gateway/test_supervisor.py
 python3 -m pytest -q
 ```
 
