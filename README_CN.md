@@ -136,8 +136,17 @@ marneo web --allow-lan --host 0.0.0.0 --port 8787
 
 ```bash
 marneo setup feishu
-marneo gateway start
+marneo gateway install    # 可选但推荐：安装 systemd/launchd 用户服务，适合 24/7 常驻
+marneo gateway start      # 已安装服务时走系统服务；否则使用临时后台进程
 marneo gateway status
+marneo gateway logs
+```
+
+前台调试模式：
+
+```bash
+marneo gateway run
+# 兼容旧用法：marneo gateway start --fg
 ```
 
 指定员工绑定飞书机器人：
@@ -351,7 +360,9 @@ Local employee / project / status APIs
 ~/.marneo/
 ├── config.yaml                    # LLM Provider / privacy / channels
 ├── gateway.pid
-├── gateway.log
+├── gateway_state.json
+├── logs/
+│   └── gateway.log
 ├── employees/
 │   └── <employee>/
 │       ├── profile.yaml           # 员工档案
@@ -416,6 +427,8 @@ marneo team list PROJECT
 ### 网关
 
 ```bash
+marneo gateway install
+marneo gateway run        # 前台运行；systemd/launchd 也使用这个入口
 marneo gateway start
 marneo gateway stop
 marneo gateway restart

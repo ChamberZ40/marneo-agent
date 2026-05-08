@@ -6,20 +6,19 @@
     <string>com.marneo.gateway</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>-m</string>
-        <string>marneo</string>
+        <string>/absolute/path/to/marneo</string>
         <string>gateway</string>
-        <string>start</string>
-        <string>--fg</string>
+        <string>run</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USER</string>
     <key>StandardOutPath</key>
-    <string>/tmp/marneo-gateway.log</string>
+    <string>/Users/YOUR_USER/.marneo/logs/gateway.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/marneo-gateway-error.log</string>
+    <string>/Users/YOUR_USER/.marneo/logs/gateway.log</string>
 </dict>
 </plist>

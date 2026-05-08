@@ -93,8 +93,17 @@ Feishu/Lark gateway:
 
 ```bash
 marneo setup feishu --employee laoqi
-marneo gateway start
+marneo gateway install    # optional but recommended for 24/7 service supervision
+marneo gateway start      # uses systemd/launchd if installed; otherwise falls back to a temporary background process
 marneo gateway status
+marneo gateway logs
+```
+
+Foreground/debug mode:
+
+```bash
+marneo gateway run
+# legacy compatibility: marneo gateway start --fg
 ```
 
 Expected channel:
@@ -208,7 +217,9 @@ Local employee / project / status APIs
 ~/.marneo/
 ├── config.yaml
 ├── gateway.pid
-├── gateway.log
+├── gateway_state.json
+├── logs/
+│   └── gateway.log
 ├── employees/
 │   └── <employee>/
 │       ├── profile.yaml

@@ -224,24 +224,43 @@ def gateway_default(ctx: typer.Context) -> None:
         cmd_status()
 
 
+@gateway_app.command("run")
+def cmd_run() -> None:
+    """前台运行 IM 网关（供 systemd/launchd 或调试使用）。"""
+    if _read_pid():
+        console.print("[yellow]网关已在运行。用 marneo gateway status 查看。[/yellow]")
+        raise typer.Exit()
+    console.print(Panel(
+        "[bold #FF6611]IM 网关（前台模式）[/bold #FF6611]\n[dim]Ctrl+C 停止[/dim]",
+        border_style="#FF6611", padding=(0, 2),
+    ))
+    _gateway_runner()
+
+
 @gateway_app.command("start")
 def cmd_start(
-    foreground: bool = typer.Option(False, "--fg", help="前台运行（调试用）"),
+    foreground: bool = typer.Option(False, "--fg", help="前台运行（兼容旧用法；推荐 marneo gateway run）"),
 ) -> None:
-    """启动 IM 网关（后台守护进程）。"""
+    """启动 IM 网关；已安装服务时优先交给 systemd/launchd。"""
     if _read_pid():
         console.print("[yellow]网关已在运行。用 marneo gateway status 查看。[/yellow]")
         raise typer.Exit()
 
     if foreground:
-        console.print(Panel(
-            "[bold #FF6611]IM 网关（前台模式）[/bold #FF6611]\n[dim]Ctrl+C 停止[/dim]",
-            border_style="#FF6611", padding=(0, 2),
-        ))
-        _gateway_runner()
+        console.print("[yellow]提示：start --fg 是兼容旧用法，推荐使用 marneo gateway run。[/yellow]")
+        cmd_run()
+        return
+
+    from marneo.gateway import supervisor
+
+    if supervisor.is_service_installed():
+        supervisor.start_service()
+        console.print("[green]✓ 已通过系统服务启动网关[/green]")
+        console.print("[dim]查看状态: marneo gateway status[/dim]")
         return
 
     log_path = _log_file()
+    console.print("[yellow]未安装系统服务，使用临时后台进程启动。推荐运行 marneo gateway install。[/yellow]")
     proc = _start_background_gateway("启动")
     console.print(f"[green]✓ 网关已启动 (PID: {proc.pid})[/green]")
     console.print(f"[dim]日志: {log_path}[/dim]")
@@ -250,6 +269,13 @@ def cmd_start(
 @gateway_app.command("stop")
 def cmd_stop() -> None:
     """停止 IM 网关。"""
+    from marneo.gateway import supervisor
+
+    if supervisor.is_service_installed():
+        supervisor.stop_service()
+        console.print("[green]✓ 已通过系统服务停止网关[/green]")
+        return
+
     pid = _read_pid()
     if not pid:
         console.print("[dim]网关未运行。[/dim]")
@@ -267,7 +293,14 @@ def cmd_stop() -> None:
 
 @gateway_app.command("restart")
 def cmd_restart() -> None:
-    """重启 IM 网关（stop + start）。"""
+    """重启 IM 网关。"""
+    from marneo.gateway import supervisor
+
+    if supervisor.is_service_installed():
+        supervisor.restart_service()
+        console.print("[green]✓ 已通过系统服务重启网关[/green]")
+        return
+
     pid = _read_pid()
     if pid:
         try:
@@ -350,39 +383,34 @@ PLATFORM_INFO = {
 }
 
 
-@gateway_app.command("install-service")
-def cmd_install_service() -> None:
-    """安装系统服务（开机自启）。"""
-    import shutil
-    from pathlib import Path
+def _install_gateway_service() -> None:
+    """Install the preferred system service through the supervisor abstraction."""
+    from marneo.gateway import supervisor
 
-    deploy_dir = Path(__file__).parent.parent.parent / "deploy"
+    try:
+        dst = supervisor.install_service()
+    except RuntimeError as exc:
+        console.print(f"[red]安装系统服务失败: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
-    if sys.platform == "darwin":
-        # macOS launchd
-        plist_src = deploy_dir / "com.marneo.gateway.plist"
-        if not plist_src.exists():
-            console.print("[red]找不到 deploy/com.marneo.gateway.plist[/red]")
-            raise typer.Exit(1)
-        dst = Path.home() / "Library/LaunchAgents/com.marneo.gateway.plist"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(plist_src, dst)
-        console.print("[green]✓ 已安装 launchd 服务[/green]")
-        console.print(f"[dim]启用: launchctl load {dst}[/dim]")
-    elif sys.platform.startswith("linux"):
-        # Linux systemd
-        service_src = deploy_dir / "marneo-gateway.service"
-        if not service_src.exists():
-            console.print("[red]找不到 deploy/marneo-gateway.service[/red]")
-            raise typer.Exit(1)
-        dst = Path.home() / ".config/systemd/user/marneo-gateway.service"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(service_src, dst)
-        console.print("[green]✓ 已安装 systemd 用户服务[/green]")
+    console.print(f"[green]✓ 已安装系统服务: {dst}[/green]")
+    if supervisor.detect_supervisor() == supervisor.SupervisorKind.SYSTEMD_USER:
         console.print("[dim]启用: systemctl --user enable marneo-gateway[/dim]")
         console.print("[dim]启动: systemctl --user start marneo-gateway[/dim]")
-    else:
-        console.print(f"[yellow]不支持的平台: {sys.platform}[/yellow]")
+    elif supervisor.detect_supervisor() == supervisor.SupervisorKind.LAUNCHD_USER:
+        console.print(f"[dim]启用: launchctl load {dst}[/dim]")
+
+
+@gateway_app.command("install")
+def cmd_install() -> None:
+    """安装系统服务（推荐命令）。"""
+    _install_gateway_service()
+
+
+@gateway_app.command("install-service")
+def cmd_install_service() -> None:
+    """安装系统服务（兼容旧命令；推荐 marneo gateway install）。"""
+    _install_gateway_service()
 
 
 @channels_app.callback(invoke_without_command=True)
