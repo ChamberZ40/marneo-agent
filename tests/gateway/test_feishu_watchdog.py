@@ -1,5 +1,5 @@
 # tests/gateway/test_feishu_watchdog.py
-"""Tests for Feishu WS watchdog — stale-connection detection."""
+"""Tests for Feishu WS watchdog — dead-connection detection without idle churn."""
 import asyncio
 import logging
 import os
@@ -16,12 +16,27 @@ from marneo.gateway.adapters.feishu import FeishuChannelAdapter
 
 
 @pytest.mark.asyncio
-async def test_watchdog_detects_stale_connection():
-    """Watchdog fires when no events received for threshold period."""
+async def test_watchdog_does_not_restart_healthy_idle_connection():
+    """A quiet but still-open WS is normal; idle time alone must not restart it."""
     adapter = FeishuChannelAdapter(MagicMock(), employee_name="test")
     adapter._last_event_time = time.monotonic() - 400  # 6+ minutes ago
-    adapter._loop = asyncio.get_running_loop()
+    adapter._ws_started_time = time.monotonic() - 400
+    adapter._ws_future = SimpleNamespace(done=lambda: False)
+    adapter._ws_client = SimpleNamespace(_conn=SimpleNamespace(closed=False, close_code=None))
+
+    assert not adapter._should_restart_ws()
+    assert adapter._ws_restart_reason() is None
+
+
+@pytest.mark.asyncio
+async def test_watchdog_restarts_when_thread_exited_even_if_not_stale():
+    """A finished WS executor future is a real dead connection signal."""
+    adapter = FeishuChannelAdapter(MagicMock(), employee_name="test")
+    adapter._last_event_time = time.monotonic()
+    adapter._ws_future = SimpleNamespace(done=lambda: True)
+
     assert adapter._should_restart_ws()
+    assert adapter._ws_restart_reason() == "WS thread exited"
 
 
 @pytest.mark.asyncio
@@ -69,12 +84,16 @@ async def test_watchdog_ignores_initial_ws_connection_window():
 
 
 @pytest.mark.asyncio
-async def test_watchdog_custom_threshold():
-    """Watchdog respects custom threshold parameter."""
+async def test_watchdog_idle_threshold_is_observability_only():
+    """Custom threshold no longer treats quiet Feishu channels as dead."""
     adapter = FeishuChannelAdapter(MagicMock(), employee_name="test")
     adapter._last_event_time = time.monotonic() - 120  # 2 minutes ago
-    assert not adapter._should_restart_ws(threshold=300)  # 5 min threshold
-    assert adapter._should_restart_ws(threshold=60)  # 1 min threshold
+    adapter._ws_started_time = time.monotonic() - 120
+    adapter._ws_future = SimpleNamespace(done=lambda: False)
+    adapter._ws_client = SimpleNamespace(_conn=SimpleNamespace(closed=False, close_code=None))
+
+    assert not adapter._should_restart_ws(threshold=300)
+    assert not adapter._should_restart_ws(threshold=60)
 
 
 @pytest.mark.asyncio

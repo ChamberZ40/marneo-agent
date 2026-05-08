@@ -6,7 +6,9 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -24,54 +26,194 @@ gateway_app.add_typer(channels_app, name="channels")
 # ── Daemon helpers ────────────────────────────────────────────────────────────
 
 def _pid_file() -> Path:
-    from marneo.core.paths import get_marneo_dir
-    return get_marneo_dir() / "gateway.pid"
+    from marneo.gateway.status import get_pid_path
+    return get_pid_path()
 
 
 def _log_file() -> Path:
-    from marneo.core.paths import get_marneo_dir
-    return get_marneo_dir() / "gateway.log"
+    from marneo.gateway.status import get_gateway_log_path
+    return get_gateway_log_path()
 
 
 def _read_pid() -> int | None:
-    p = _pid_file()
-    if not p.exists():
-        return None
-    try:
-        pid = int(p.read_text().strip())
-        os.kill(pid, 0)
-        return pid
-    except (ValueError, OSError):
-        p.unlink(missing_ok=True)
-        return None
+    from marneo.gateway.status import read_pid_file
+    return read_pid_file()
+
+
+def _spawn_gateway_process() -> subprocess.Popen[Any]:
+    """Spawn the gateway child process; the child writes PID after acquiring the lock."""
+    log_path = _log_file()
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from marneo.cli.gateway_cmd import _gateway_runner; _gateway_runner()",
+        ],
+        stdout=open(log_path, "a"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        cwd=str(Path.home()),
+    )
+
+
+def _wait_for_gateway_start(proc: subprocess.Popen[Any], timeout: float = 8.0) -> bool:
+    """Return True once the child owns the PID file, is alive, and reports ready."""
+    from marneo.gateway.status import read_runtime_status
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return False
+        pid = _read_pid()
+        state = read_runtime_status() or {}
+        if pid == proc.pid and state.get("pid") == proc.pid and state.get("gateway_state") == "running":
+            return True
+        if state.get("pid") == proc.pid and state.get("gateway_state") == "failed":
+            return False
+        time.sleep(0.05)
+    state = read_runtime_status() or {}
+    return (
+        _read_pid() == proc.pid
+        and proc.poll() is None
+        and state.get("pid") == proc.pid
+        and state.get("gateway_state") == "running"
+    )
+
+
+def _wait_for_pid_exit(pid: int, timeout: float = 10.0) -> bool:
+    """Wait until a PID exits; do not report stop/restart success before this."""
+    from marneo.gateway.status import is_process_alive
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_process_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not is_process_alive(pid)
+
+
+def _remove_pid_file_force() -> None:
+    _pid_file().unlink(missing_ok=True)
+
+
+def _start_background_gateway(action_label: str = "启动") -> subprocess.Popen[Any]:
+    proc = _spawn_gateway_process()
+    if not _wait_for_gateway_start(proc):
+        console.print(f"[red]网关{action_label}失败：子进程未写入 PID 或已退出。请查看日志: {_log_file()}[/red]")
+        raise typer.Exit(1)
+    return proc
+
+
+def _terminate_gateway_pid(pid: int, *, restart_requested: bool = False, timeout: float = 10.0) -> bool:
+    from marneo.gateway.status import write_runtime_status
+
+    write_runtime_status(
+        gateway_state="stopping",
+        exit_reason="planned_restart" if restart_requested else "normal_stop",
+        restart_requested=restart_requested,
+        pid=pid,
+    )
+    os.kill(pid, signal.SIGTERM)
+    if not _wait_for_pid_exit(pid, timeout=timeout):
+        return False
+    _remove_pid_file_force()
+    return True
 
 
 def _gateway_runner() -> None:
-    """Entry point for the background gateway process."""
+    """Entry point for the foreground/background gateway process."""
     import asyncio
     import logging
+
+    from marneo.gateway.locks import LockUnavailable, acquire_gateway_lock, release_lock
+    from marneo.gateway.status import (
+        redact_secret_text,
+        remove_pid_file,
+        write_pid_file,
+        write_runtime_status,
+    )
+
+    log_path = _log_file()
     logging.basicConfig(
-        filename=str(_log_file()),
+        filename=str(log_path),
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    from marneo.gateway.manager import GatewayManager
-    from marneo.gateway.adapters.feishu import FeishuChannelAdapter
-    from marneo.gateway.adapters.wechat import WeChatChannelAdapter
-    from marneo.gateway.adapters.telegram import TelegramAdapter
-    from marneo.gateway.adapters.discord_adapter import DiscordAdapter
+    log = logging.getLogger(__name__)
 
-    manager = GatewayManager()
-    manager.register(FeishuChannelAdapter(manager))
-    manager.register(WeChatChannelAdapter(manager))
-    manager.register(TelegramAdapter(manager))
-    manager.register(DiscordAdapter(manager))
+    lock = None
+    try:
+        lock = acquire_gateway_lock()
+    except LockUnavailable as exc:
+        message = redact_secret_text(str(exc))
+        write_runtime_status(gateway_state="failed", exit_reason="lock_unavailable", error_message=message)
+        log.error("Gateway lock unavailable: %s", message)
+        raise SystemExit(1) from exc
 
-    # Load all tools (triggers self-registration in registry)
-    from marneo.tools.loader import load_all_tools
-    load_all_tools()
+    try:
+        write_pid_file()
+        write_runtime_status(gateway_state="starting", active_agents=0, restart_requested=False, exit_reason=None)
 
-    asyncio.run(manager.run_forever())
+        from marneo.gateway.manager import GatewayManager
+        from marneo.gateway.adapters.feishu import FeishuChannelAdapter
+        from marneo.gateway.adapters.wechat import WeChatChannelAdapter
+        from marneo.gateway.adapters.telegram import TelegramAdapter
+        from marneo.gateway.adapters.discord_adapter import DiscordAdapter
+
+        manager = GatewayManager()
+        manager.register(FeishuChannelAdapter(manager))
+        manager.register(WeChatChannelAdapter(manager))
+        manager.register(TelegramAdapter(manager))
+        manager.register(DiscordAdapter(manager))
+
+        # Load all tools (triggers self-registration in registry)
+        from marneo.tools.loader import load_all_tools
+        load_all_tools()
+
+        async def _run_with_signals() -> None:
+            loop = asyncio.get_running_loop()
+            stop_event = asyncio.Event()
+
+            def _request_stop() -> None:
+                manager.request_stop()
+                stop_event.set()
+
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, _request_stop)
+                except (NotImplementedError, RuntimeError):
+                    signal.signal(sig, lambda *_args: _request_stop())
+
+            task = asyncio.create_task(manager.run_forever())
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, pending = await asyncio.wait(
+                {task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                manager.request_stop()
+                await task
+            else:
+                stop_task.cancel()
+                await task
+            for pending_task in pending:
+                pending_task.cancel()
+
+        asyncio.run(_run_with_signals())
+        write_runtime_status(gateway_state="stopped", exit_reason="normal_stop")
+    except KeyboardInterrupt:
+        write_runtime_status(gateway_state="stopped", exit_reason="keyboard_interrupt")
+        raise
+    except BaseException as exc:
+        write_runtime_status(
+            gateway_state="failed",
+            exit_reason=type(exc).__name__,
+            error_message=redact_secret_text(str(exc)),
+        )
+        raise
+    finally:
+        remove_pid_file()
+        release_lock(lock)
 
 
 # ── Gateway commands ──────────────────────────────────────────────────────────
@@ -100,17 +242,7 @@ def cmd_start(
         return
 
     log_path = _log_file()
-    pid_path = _pid_file()
-
-    proc = subprocess.Popen(
-        [sys.executable, "-c",
-         "from marneo.cli.gateway_cmd import _gateway_runner; _gateway_runner()"],
-        stdout=open(log_path, "a"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        cwd=str(Path.home()),
-    )
-    pid_path.write_text(str(proc.pid))
+    proc = _start_background_gateway("启动")
     console.print(f"[green]✓ 网关已启动 (PID: {proc.pid})[/green]")
     console.print(f"[dim]日志: {log_path}[/dim]")
 
@@ -123,12 +255,14 @@ def cmd_stop() -> None:
         console.print("[dim]网关未运行。[/dim]")
         raise typer.Exit()
     try:
-        os.kill(pid, signal.SIGTERM)
-        _pid_file().unlink(missing_ok=True)
+        if not _terminate_gateway_pid(pid, restart_requested=False):
+            console.print(f"[red]停止超时：进程仍在运行 (PID: {pid})[/red]")
+            raise typer.Exit(1)
         console.print(f"[green]✓ 网关已停止 (PID: {pid})[/green]")
     except OSError as e:
         console.print(f"[red]停止失败: {e}[/red]")
-        _pid_file().unlink(missing_ok=True)
+        _remove_pid_file_force()
+        raise typer.Exit(1) from e
 
 
 @gateway_app.command("restart")
@@ -137,45 +271,56 @@ def cmd_restart() -> None:
     pid = _read_pid()
     if pid:
         try:
-            os.kill(pid, signal.SIGTERM)
-            _pid_file().unlink(missing_ok=True)
+            if not _terminate_gateway_pid(pid, restart_requested=True):
+                console.print(f"[red]旧进程未退出，已取消重启 (PID: {pid})[/red]")
+                raise typer.Exit(1)
             console.print(f"[dim]已停止旧进程 (PID: {pid})[/dim]")
-        except OSError:
-            _pid_file().unlink(missing_ok=True)
+        except OSError as e:
+            console.print(f"[red]停止旧进程失败: {e}[/red]")
+            _remove_pid_file_force()
+            raise typer.Exit(1) from e
     else:
         console.print("[dim]网关未运行，直接启动...[/dim]")
 
-    import time
-    time.sleep(1)
-
     log_path = _log_file()
-    pid_path = _pid_file()
-    proc = subprocess.Popen(
-        [sys.executable, "-c",
-         "from marneo.cli.gateway_cmd import _gateway_runner; _gateway_runner()"],
-        stdout=open(log_path, "a"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        cwd=str(Path.home()),
-    )
-    pid_path.write_text(str(proc.pid))
+    proc = _start_background_gateway("重启")
     console.print(f"[green]✓ 网关已重启 (PID: {proc.pid})[/green]")
     console.print(f"[dim]日志: {log_path}[/dim]")
+
+
+def _format_state_line(state: dict[str, Any]) -> str:
+    gateway_state = state.get("gateway_state") or "unknown"
+    channels = state.get("channels") if isinstance(state.get("channels"), dict) else {}
+    connected = [
+        channel_id for channel_id, detail in channels.items()
+        if isinstance(detail, dict) and detail.get("connected", detail.get("state") == "connected")
+    ]
+    if connected:
+        return f"状态: {gateway_state}; channels: {', '.join(sorted(connected))}"
+    return f"状态: {gateway_state}; channels: —"
 
 
 @gateway_app.command("status")
 def cmd_status() -> None:
     """查看网关状态。"""
+    from marneo.gateway.status import read_runtime_status, redact_secret_text
+
     pid = _read_pid()
+    state = read_runtime_status()
     if pid:
         console.print(f"[green]🟢 网关运行中 (PID: {pid})[/green]")
+        if state:
+            console.print(f"[dim]{redact_secret_text(_format_state_line(state))}[/dim]")
         log = _log_file()
         if log.exists():
             lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
             if lines:
-                console.print(f"[dim]最新: {lines[-1][:80]}[/dim]")
+                console.print(f"[dim]最新: {redact_secret_text(lines[-1])[:120]}[/dim]")
     else:
-        console.print("[dim]⚪ 网关未运行。运行 marneo gateway start 启动。[/dim]")
+        if state and state.get("gateway_state"):
+            console.print(f"[dim]⚪ 网关未运行。最近状态: {state.get('gateway_state')}[/dim]")
+        else:
+            console.print("[dim]⚪ 网关未运行。运行 marneo gateway start 启动。[/dim]")
 
 
 @gateway_app.command("logs")
@@ -183,11 +328,15 @@ def cmd_logs(n: int = typer.Option(50, "-n")) -> None:
     """查看网关日志。"""
     log = _log_file()
     if not log.exists():
+        legacy_log = _pid_file().with_name("gateway.log")
+        log = legacy_log if legacy_log.exists() else log
+    if not log.exists():
         console.print("[dim]暂无日志。[/dim]")
         return
+    from marneo.gateway.status import redact_secret_text
     lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()[-n:]
     for line in lines:
-        console.print(f"[dim]{line}[/dim]")
+        console.print(f"[dim]{redact_secret_text(line)}[/dim]")
 
 
 # ── Channels sub-commands ─────────────────────────────────────────────────────

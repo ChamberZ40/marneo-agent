@@ -543,11 +543,27 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         status["next_backoff_seconds"] = self._ws_restart_backoff_delay()
         return status
 
-    def _should_restart_ws(self, threshold: float = 300) -> bool:
-        """Check if WS should be restarted due to inactivity (testable sync helper)."""
-        if self._last_event_time == 0:
-            return False  # never received, still starting up
-        return time.monotonic() - self._last_event_time > threshold
+    def _ws_restart_reason(self) -> str | None:
+        """Return the concrete WS death reason, or None when the connection is only idle.
+
+        A quiet Feishu bot can legitimately receive no business events for hours.
+        Restart only on structural death signals: executor exit or SDK connection
+        loss.  Idle age stays observable in health but is not a restart trigger.
+        """
+        if self._ws_future is not None and self._ws_future.done():
+            return "WS thread exited"
+        if self._ws_connection_lost():
+            return "WS connection lost"
+        return None
+
+    def _should_restart_ws(self, threshold: float | None = None) -> bool:
+        """Check if WS should be restarted (testable sync helper).
+
+        ``threshold`` is accepted for backward-compatible tests/callers but no
+        longer makes idle time a restart condition. Feishu WS idleness is normal;
+        only concrete connection-loss signals should trigger a full restart.
+        """
+        return self._ws_restart_reason() is not None
 
     def _ws_connection_lost(self, startup_grace: float = 30) -> bool:
         """Detect lark-oapi receive-loop death while Client.start() still blocks.
@@ -575,36 +591,20 @@ class FeishuChannelAdapter(BaseChannelAdapter):
         return False
 
     async def _watchdog_loop(self) -> None:
-        """Periodically check for stale WS connection and FULL restart if needed.
+        """Periodically check for dead WS connection and FULL restart if needed.
 
         Hermes pattern: don't rely on SDK auto_reconnect.
         Kill the entire WS thread + Client, then create brand new ones.
-        Also detects when the WS thread has exited (connection lost).
+        Restart only for concrete death signals, not for a quiet/idle channel.
         """
         while self._running:
             await asyncio.sleep(60)
             if not self._running:
                 break
 
-            # Check 1: WS thread died (connection lost, start() returned)
-            ws_thread_dead = (
-                self._ws_future is not None
-                and self._ws_future.done()
-            )
+            reason = self._ws_restart_reason()
 
-            # Check 2: lark-oapi receive task died but Client.start() is still blocked
-            ws_connection_lost = self._ws_connection_lost()
-
-            # Check 3: No events for threshold period
-            stale = self._should_restart_ws()
-
-            if ws_thread_dead or ws_connection_lost or stale:
-                if ws_thread_dead:
-                    reason = "WS thread exited"
-                elif ws_connection_lost:
-                    reason = "WS connection lost"
-                else:
-                    reason = "no events for 5m"
+            if reason:
                 log.warning("[Feishu] Watchdog: %s — full restart (hermes pattern)", reason)
                 try:
                     # Kill everything

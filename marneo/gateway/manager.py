@@ -1,6 +1,8 @@
 # marneo/gateway/manager.py
 from __future__ import annotations
-import asyncio, logging, time
+import asyncio
+import logging
+import time
 from collections import OrderedDict
 from typing import Any
 from marneo.gateway.base import BaseChannelAdapter, ChannelMessage
@@ -38,6 +40,31 @@ class GatewayManager:
         self._sessions = SessionStore()
         self._dedup = _Dedup()
         self._running = False
+
+    def request_stop(self) -> None:
+        """Ask the run loop to stop gracefully."""
+        self._running = False
+
+    def _channel_runtime_status(self, platform: str, adapter: BaseChannelAdapter) -> dict[str, Any]:
+        detail = self._channel_health_detail(platform, adapter)
+        detail["state"] = "connected" if adapter.is_running else "disconnected"
+        detail["connected"] = bool(adapter.is_running)
+        return detail
+
+    def write_runtime_status_snapshot(self, gateway_state: str = "running") -> None:
+        """Persist a redacted runtime snapshot for CLI/doctor/status tooling."""
+        try:
+            from marneo.gateway.status import write_runtime_status
+            write_runtime_status(
+                gateway_state=gateway_state,
+                active_agents=self._sessions.active_count,
+                channels={
+                    platform: self._channel_runtime_status(platform, adapter)
+                    for platform, adapter in self._adapters.items()
+                },
+            )
+        except Exception as exc:
+            log.debug("[Gateway] runtime status update skipped: %s", exc)
 
     def register(self, adapter: BaseChannelAdapter) -> None:
         self._adapters[adapter.platform] = adapter
@@ -279,16 +306,19 @@ class GatewayManager:
             except Exception as exc:
                 log.warning("[Gateway] Session cleanup error: %s", exc)
 
-    async def run_forever(self) -> None:
+    async def run_forever(self, *, start_health: bool = True) -> None:
         self._running = True
         await self.start_all()
-        await self._start_health_server()
+        if start_health:
+            await self._start_health_server()
         asyncio.create_task(self._session_cleanup_loop())
+        self.write_runtime_status_snapshot("running")
         log.info("[Gateway] Running.")
         try:
             while self._running:
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
-            pass
+            self.request_stop()
         finally:
             await self.stop_all()
+            self.write_runtime_status_snapshot("stopped")
