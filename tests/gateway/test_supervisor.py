@@ -170,6 +170,76 @@ def test_gateway_restart_uses_service_when_installed(monkeypatch, tmp_path):
     assert "系统服务" in result.output
 
 
+def test_gateway_status_includes_installed_service_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from marneo.cli import gateway_cmd
+
+    monkeypatch.setattr(gateway_cmd, "_read_pid", lambda: None)
+    monkeypatch.setattr(
+        supervisor,
+        "service_status",
+        lambda: {
+            "kind": "launchd_user",
+            "installed": True,
+            "active": True,
+            "path": "/Users/example/Library/LaunchAgents/com.marneo.gateway.plist",
+            "returncode": 0,
+        },
+    )
+
+    result = runner.invoke(app, ["gateway", "status"])
+
+    assert result.exit_code == 0
+    assert "系统服务" in result.output
+    assert "launchd_user" in result.output
+    assert "active" in result.output
+    assert "com.marneo.gateway.plist" in result.output
+
+
+def test_gateway_status_service_query_failure_does_not_crash(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from marneo.cli import gateway_cmd
+
+    monkeypatch.setattr(gateway_cmd, "_read_pid", lambda: None)
+
+    def fake_status():
+        raise RuntimeError("launchctl unavailable")
+
+    monkeypatch.setattr(supervisor, "service_status", fake_status)
+
+    result = runner.invoke(app, ["gateway", "status"])
+
+    assert result.exit_code == 0
+    assert "系统服务" in result.output
+    assert "状态查询失败" in result.output
+    assert "launchctl unavailable" in result.output
+
+
+def test_gateway_status_redacts_service_status_line(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from marneo.cli import gateway_cmd
+
+    monkeypatch.setattr(gateway_cmd, "_read_pid", lambda: None)
+    monkeypatch.setattr(
+        supervisor,
+        "service_status",
+        lambda: {
+            "kind": "systemd_user",
+            "installed": True,
+            "active": False,
+            "path": "/tmp/marneo/access_key=abc123456789012345678901234567890/service",
+            "returncode": 3,
+        },
+    )
+
+    result = runner.invoke(app, ["gateway", "status"])
+
+    assert result.exit_code == 0
+    assert "系统服务" in result.output
+    assert "systemd_user" in result.output
+    assert "inactive" in result.output
+    assert "abc123456789012345678901234567890" not in result.output
+
 
 def test_reference_deploy_templates_match_supervisor_entrypoint_and_logs():
     root = Path(__file__).resolve().parents[2]

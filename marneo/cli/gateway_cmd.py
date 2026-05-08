@@ -333,17 +333,37 @@ def _format_state_line(state: dict[str, Any]) -> str:
     return f"状态: {gateway_state}; channels: —"
 
 
+def _format_service_status_line(service: dict[str, object]) -> str | None:
+    """Return a compact service-manager status line for `gateway status`."""
+    if not service.get("installed"):
+        return None
+    active = "active" if service.get("active") else "inactive"
+    kind = service.get("kind") or "unknown"
+    path = service.get("path") or "—"
+    returncode = service.get("returncode")
+    rc = f"; rc={returncode}" if returncode is not None else ""
+    return f"系统服务: {kind}; {active}; path: {path}{rc}"
+
+
 @gateway_app.command("status")
 def cmd_status() -> None:
     """查看网关状态。"""
+    from marneo.gateway import supervisor
     from marneo.gateway.status import read_runtime_status, redact_secret_text
 
     pid = _read_pid()
     state = read_runtime_status()
+    service_line: str | None = None
+    try:
+        service_line = _format_service_status_line(supervisor.service_status())
+    except RuntimeError as exc:
+        service_line = f"系统服务: 状态查询失败: {exc}"
     if pid:
         console.print(f"[green]🟢 网关运行中 (PID: {pid})[/green]")
         if state:
             console.print(f"[dim]{redact_secret_text(_format_state_line(state))}[/dim]")
+        if service_line:
+            console.print(f"[dim]{redact_secret_text(service_line)}[/dim]")
         log = _log_file()
         if log.exists():
             lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -354,6 +374,8 @@ def cmd_status() -> None:
             console.print(f"[dim]⚪ 网关未运行。最近状态: {state.get('gateway_state')}[/dim]")
         else:
             console.print("[dim]⚪ 网关未运行。运行 marneo gateway start 启动。[/dim]")
+        if service_line:
+            console.print(f"[dim]{redact_secret_text(service_line)}[/dim]")
 
 
 @gateway_app.command("logs")
