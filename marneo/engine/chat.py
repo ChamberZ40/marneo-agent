@@ -2,7 +2,6 @@
 """Marneo chat engine — streaming conversation."""
 from __future__ import annotations
 
-import base64
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -18,6 +17,8 @@ _MAX_TEXT_INJECT = 200_000  # 200 KB max for text file inline injection
 _LOOP_DETECT_THRESHOLD = 3  # consecutive identical tool calls before breaking
 _DEFAULT_TOOL_RESULT_CONTEXT_MAX_CHARS = 8_000
 _DEFAULT_CONTEXT_BUDGET_MAX_CHARS = 50_000
+_DEFAULT_PROVIDER_TIMEOUT_SECONDS = 60.0
+_DEFAULT_PROVIDER_MAX_RETRIES = 1
 
 
 def _build_content_blocks(
@@ -286,9 +287,16 @@ class ChatSession:
 
         tool_defs = registry.get_definitions()
         if not tool_defs:
+            log.info("[send_with_tools] No tool definitions available; falling back to plain send")
             async for event in self.send(user_text, attachments=attachments):
                 yield event
             return
+
+        log.info(
+            "[send_with_tools] Starting tool loop: tool_count=%d max_iterations=%d",
+            len(tool_defs),
+            max_iterations,
+        )
 
         # First call uses user_text; subsequent iterations skip the user append
         # by directly calling the LLM with existing history (tool results already injected)
@@ -436,6 +444,42 @@ class ChatSession:
 
         yield ChatEvent(type="done")
 
+    async def _call_openai(self, provider: ResolvedProvider) -> AsyncIterator[ChatEvent]:
+        """OpenAI-compatible streaming call without tools."""
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            api_key=provider.api_key,
+            base_url=provider.base_url,
+            timeout=_DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+            max_retries=_DEFAULT_PROVIDER_MAX_RETRIES,
+        )
+        msgs: list[dict] = []
+        if self.system_prompt:
+            msgs.append({"role": "system", "content": self.system_prompt})
+        msgs.extend(self.messages)
+
+        stream = await client.chat.completions.create(
+            model=provider.model,
+            messages=msgs,  # type: ignore[arg-type]
+            max_tokens=4096,
+            stream=True,
+        )
+
+        async for chunk in stream:
+            if hasattr(chunk, "usage") and chunk.usage:
+                self.token_tracker.record_from_openai(provider.model, chunk)
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta is None:
+                continue
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                yield ChatEvent(type="thinking", content=reasoning)
+            if delta.content:
+                yield ChatEvent(type="text", content=delta.content)
+
     async def _call_openai_with_tools(
         self, provider: ResolvedProvider, tool_defs: list
     ) -> AsyncIterator["ChatEvent"]:
@@ -443,7 +487,12 @@ class ChatSession:
         import json as _json
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=provider.api_key, base_url=provider.base_url)
+        client = AsyncOpenAI(
+            api_key=provider.api_key,
+            base_url=provider.base_url,
+            timeout=_DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+            max_retries=_DEFAULT_PROVIDER_MAX_RETRIES,
+        )
         msgs: list[dict] = []
         if self.system_prompt:
             msgs.append({"role": "system", "content": self.system_prompt})
